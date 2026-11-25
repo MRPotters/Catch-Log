@@ -629,18 +629,21 @@ $('pickOk').onclick = () => {
 };
 
 // "Add past catch": choose when/where first, then the normal details sheet.
-$('pastBtn').onclick = () => openPicker({ time: Date.now() - HOUR, lat: null, lon: null }, async w => {
-  const c = { id: uid(), time: w.time, tripId: null, lat: w.lat, lon: w.lon, acc: null, manual: true,
-    moon: moonPhase(w.time), species: '', size: '', method: '', angler: '', notes: '', photo: null,
-    weather: null, tide: null, astro: astro(w.time, w.lat, w.lon) };
-  await put('catches', c);
-  openSheet(c); renderList(); enrichAll();
-});
+// "Add past catch": opens a blank catch. A gallery photo fills the time; drop a pin on the map.
+// Nothing is saved until Save.
+$('pastBtn').onclick = () => openSheet({ id: uid(), draft: true, time: null, tripId: null, lat: null, lon: null,
+  acc: null, manual: true, moon: null, species: '', size: '', method: '', angler: '', notes: '', photo: null,
+  weather: null, tide: null, astro: null });
 
 // Change time/location on an existing catch: clears weather & tide so they're re-fetched.
-$('changeWhereBtn').onclick = () => openPicker({ time: editing.time, lat: editing.lat, lon: editing.lon }, applyWhere);
+$('changeWhereBtn').onclick = () => openPicker({ time: editing.time ?? Date.now() - HOUR, lat: editing.lat, lon: editing.lon }, applyWhere);
 // Move the open catch to a new time/place; weather & tide are cleared and re-fetched.
 async function applyWhere(w) {
+  if (editing.draft) {
+    Object.assign(editing, { time: w.time, lat: w.lat, lon: w.lon, acc: null, manual: w.src || true,
+      moon: moonPhase(w.time), weather: null, tide: null, astro: w.lat != null ? astro(w.time, w.lat, w.lon) : null });
+    renderMeta(); return;
+  }
   const cur = await get('catches', editing.id) || { ...editing };
   const upd = { time: w.time, lat: w.lat, lon: w.lon, acc: null, manual: w.src || true, moon: moonPhase(w.time),
     weather: null, tide: null, astro: astro(w.time, w.lat, w.lon) };
@@ -715,6 +718,12 @@ async function checkPhotoInfo(f) {
   box.textContent = x.format ? `Photo info: can't read (${f.type || 'unknown type'}, not JPEG)`
     : `Photo info: time ${hasT ? '✓ ' + fmtTime(x.time) : '✗'} · location ${hasL ? `✓ ${x.lat.toFixed(4)}, ${x.lon.toFixed(4)}` : '✗'}`;
   if (!hasT) return;
+  if (editing.draft) {
+    if (hasL) await applyWhere({ time: x.time, lat: x.lat, lon: x.lon, src: 'photo' });
+    else { editing.time = x.time; editing.moon = moonPhase(x.time); renderMeta();
+      openPicker({ time: x.time, lat: editing.lat, lon: editing.lon }, applyWhere); }
+    return;
+  }
   const same = Math.abs(x.time - editing.time) < 2 * 60000 &&
     (!hasL || (editing.lat != null && Math.abs(x.lat - editing.lat) < 0.002 && Math.abs(x.lon - editing.lon) < 0.002));
   if (same) return;
@@ -729,6 +738,13 @@ async function checkPhotoInfo(f) {
 function renderMeta() {
   if (!editing) return;
   const c = editing;
+  if (c.draft && (c.time == null || c.lat == null)) {
+    $('sheetMeta').innerHTML = `<b>New past catch</b><br>📅 ${c.time == null ? 'Time: add a photo from the gallery, or set it below' : fmtTime(c.time)}` +
+      `<br>📍 ${c.lat == null ? 'Location: tap below to drop a pin' : `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}`}`;
+    $('changeWhereBtn').textContent = c.time == null ? '📍 Set time / location' : '📍 Drop pin on map';
+    return;
+  }
+  $('changeWhereBtn').textContent = '📍 Change time / location';
   const loc = c.lat == null ? 'Getting location…'
     : `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}` + (c.acc != null ? ` (±${c.acc} m)` : c.manual === 'photo' ? ' (from photo)' : ' (set on map)');
   const w = weatherText(c.weather) || 'Weather: ' + (c.wMsg ? 'not available yet' : navigator.onLine ? 'fetching…' : 'will fill in when back in signal');
@@ -744,6 +760,7 @@ async function openSheet(c) {
   $('photo').value = '';
   $('photoPrev').src = c.photo || ''; $('photoPrev').style.display = c.photo ? 'block' : 'none';
   $('exifInfo').style.display = 'none';
+  $('delBtn').textContent = c.draft ? 'Discard' : 'Delete';
   renderMethods(); await renderAnglers(); await renderSpeciesList();
   $('sheet').classList.add('open');
 }
@@ -798,6 +815,12 @@ async function usePhoto(f, fromCamera) {
 $('photo').onchange = e => { usePhoto(e.target.files[0], true); e.target.value = ''; };
 $('photoGal').onchange = e => { usePhoto(e.target.files[0], false); e.target.value = ''; };
 $('saveBtn').onclick = async () => {
+  if (editing.draft && (editing.time == null || editing.lat == null)) {
+    openPicker({ time: editing.time ?? Date.now() - HOUR, lat: editing.lat, lon: editing.lon },
+      async w => { await applyWhere(w); $('saveBtn').click(); });
+    return;
+  }
+  const wasDraft = !!editing.draft; delete editing.draft;
   const latest = await get('catches', editing.id) || {};
   Object.assign(editing, {
     lat: latest.lat ?? editing.lat, lon: latest.lon ?? editing.lon, acc: latest.acc ?? editing.acc,
@@ -807,12 +830,19 @@ $('saveBtn').onclick = async () => {
   });
   await put('catches', editing);
   closeSheet(); renderList();
+  if (wasDraft) enrichAll();
 };
 $('delBtn').onclick = async () => {
+  if (editing.draft) { closeSheet(); return; }
   if (!confirm('Delete this catch?')) return;
   await del('catches', editing.id); closeSheet(); renderList();
 };
-$('sheet').onclick = e => { if (e.target.id === 'sheet') $('saveBtn').click(); };
+$('sheet').onclick = e => {
+  if (e.target.id !== 'sheet') return;
+  // tapping outside a blank, untouched past catch just closes it
+  if (editing && editing.draft && editing.time == null && !editing.photo && !$('species').value.trim()) closeSheet();
+  else $('saveBtn').click();
+};
 
 async function renderList() {
   const cs = (await all('catches')).sort((a, b) => b.time - a.time);
