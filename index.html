@@ -102,6 +102,7 @@
     <input type="file" accept="image/*" capture="environment" id="photo" hidden>
     <input type="file" accept="image/*" id="photoGal" hidden>
     <img class="photo-prev" id="photoPrev" alt="">
+    <div class="meta" id="exifInfo" style="margin-top:8px;display:none"></div>
 
     <label>Species</label>
     <input type="text" id="species" list="speciesList" placeholder="e.g. Snapper">
@@ -637,21 +638,99 @@ $('pastBtn').onclick = () => openPicker({ time: Date.now() - HOUR, lat: null, lo
 });
 
 // Change time/location on an existing catch: clears weather & tide so they're re-fetched.
-$('changeWhereBtn').onclick = () => openPicker({ time: editing.time, lat: editing.lat, lon: editing.lon }, async w => {
+$('changeWhereBtn').onclick = () => openPicker({ time: editing.time, lat: editing.lat, lon: editing.lon }, applyWhere);
+// Move the open catch to a new time/place; weather & tide are cleared and re-fetched.
+async function applyWhere(w) {
   const cur = await get('catches', editing.id) || { ...editing };
-  const upd = { time: w.time, lat: w.lat, lon: w.lon, acc: null, manual: true, moon: moonPhase(w.time),
+  const upd = { time: w.time, lat: w.lat, lon: w.lon, acc: null, manual: w.src || true, moon: moonPhase(w.time),
     weather: null, tide: null, astro: astro(w.time, w.lat, w.lon) };
   Object.assign(cur, upd); Object.assign(editing, upd);
   for (const k of ['wErr', 'wMsg', 'tErr', 'tMsg']) { delete cur[k]; delete editing[k]; }
   await put('catches', cur);
   renderMeta(); renderList(); enrichAll();
-});
+}
+
+/* ---------- photo EXIF: date taken + GPS (JPEG only) ---------- */
+async function readExif(file) {
+  const buf = await file.slice(0, 256 * 1024).arrayBuffer();
+  const v = new DataView(buf);
+  if (v.byteLength < 4 || v.getUint16(0) !== 0xFFD8) return { format: 'not JPEG' };
+  let p = 2;
+  while (p + 4 < v.byteLength) {
+    const marker = v.getUint16(p), len = v.getUint16(p + 2);
+    if (marker === 0xFFE1 && v.getUint32(p + 4) === 0x45786966) return parseTiff(v, p + 10);  // "Exif"
+    if ((marker & 0xFF00) !== 0xFF00 || marker === 0xFFDA) break;
+    p += 2 + len;
+  }
+  return {};
+}
+function parseTiff(v, t) {
+  const le = v.getUint16(t) === 0x4949;
+  const u16 = o => v.getUint16(t + o, le), u32 = o => v.getUint32(t + o, le);
+  const str = (o, n) => { let s = ''; for (let i = 0; i < n; i++) { const c = v.getUint8(t + o + i); if (!c) break; s += String.fromCharCode(c); } return s; };
+  const ifd = off => {
+    const tags = {}, n = u16(off);
+    for (let i = 0; i < n; i++) {
+      const e = off + 2 + i * 12, tag = u16(e), type = u16(e + 2), cnt = u32(e + 4);
+      const size = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 }[type] || 1;
+      const vo = size * cnt > 4 ? u32(e + 8) : e + 8;
+      if (type === 2) tags[tag] = str(vo, cnt);
+      else if (type === 3) tags[tag] = u16(vo);
+      else if (type === 4) tags[tag] = u32(vo);
+      else if (type === 5) tags[tag] = Array.from({ length: cnt }, (_, k) => u32(vo + k * 8) / (u32(vo + k * 8 + 4) || 1));
+      else if (type === 1 || type === 7) tags[tag] = v.getUint8(t + vo);
+    }
+    return tags;
+  };
+  const out = {};
+  try {
+    const ifd0 = ifd(u32(4));
+    const ex = ifd0[0x8769] ? ifd(ifd0[0x8769]) : {};
+    const dt = ex[0x9003] || ex[0x9004] || ifd0[0x0132];         // DateTimeOriginal / Digitized / DateTime
+    if (dt) {
+      const m = dt.match(/(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/);
+      if (m) {
+        const off = ex[0x9011] || ex[0x9010];                       // e.g. "+13:00"
+        out.time = off && /^[+-]\d\d:\d\d$/.test(off)
+          ? Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}${off}`)
+          : new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();  // assume phone's time zone
+      }
+    }
+    if (ifd0[0x8825]) {
+      const g = ifd(ifd0[0x8825]);
+      const dms = a => Array.isArray(a) && a.length === 3 ? a[0] + a[1] / 60 + a[2] / 3600 : null;
+      let lat = dms(g[2]), lon = dms(g[4]);
+      if (lat != null && lon != null && (lat || lon)) {
+        if (g[1] === 'S') lat = -lat; if (g[3] === 'W') lon = -lon;
+        out.lat = lat; out.lon = lon;
+      }
+    }
+  } catch (e) { out.error = e.message; }
+  return out;
+}
+async function checkPhotoInfo(f) {
+  const box = $('exifInfo'); box.style.display = 'block';
+  const x = await readExif(f);
+  const hasT = !!x.time, hasL = x.lat != null;
+  box.textContent = x.format ? `Photo info: can't read (${f.type || 'unknown type'}, not JPEG)`
+    : `Photo info: time ${hasT ? '✓ ' + fmtTime(x.time) : '✗'} · location ${hasL ? `✓ ${x.lat.toFixed(4)}, ${x.lon.toFixed(4)}` : '✗'}`;
+  if (!hasT) return;
+  const same = Math.abs(x.time - editing.time) < 2 * 60000 &&
+    (!hasL || (editing.lat != null && Math.abs(x.lat - editing.lat) < 0.002 && Math.abs(x.lon - editing.lon) < 0.002));
+  if (same) return;
+  if (hasL) {
+    if (confirm(`Photo was taken ${fmtTime(x.time)} at ${x.lat.toFixed(4)}, ${x.lon.toFixed(4)}.\n\nUse this time and location for the catch?`))
+      await applyWhere({ time: x.time, lat: x.lat, lon: x.lon, src: 'photo' });
+  } else if (confirm(`Photo was taken ${fmtTime(x.time)} but has no location.\n\nUse this time and pick the spot on the map?`)) {
+    openPicker({ time: x.time, lat: editing.lat, lon: editing.lon }, applyWhere);
+  }
+}
 
 function renderMeta() {
   if (!editing) return;
   const c = editing;
   const loc = c.lat == null ? 'Getting location…'
-    : `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}` + (c.acc != null ? ` (±${c.acc} m)` : ' (set on map)');
+    : `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}` + (c.acc != null ? ` (±${c.acc} m)` : c.manual === 'photo' ? ' (from photo)' : ' (set on map)');
   const w = weatherText(c.weather) || 'Weather: ' + (c.wMsg ? 'not available yet' : navigator.onLine ? 'fetching…' : 'will fill in when back in signal');
   const td = tideText(c.tide) || 'Tide: ' + (c.tMsg ? 'not available yet' : navigator.onLine ? 'fetching…' : 'will fill in when back in signal');
   $('sheetMeta').innerHTML = `<b>${fmtTime(c.time)}</b><br>📍 ${loc}<br>🌙 ${c.moon.name} · ${c.moon.illum}% lit` +
@@ -664,6 +743,7 @@ async function openSheet(c) {
   $('species').value = c.species; $('size').value = c.size; $('notes').value = c.notes;
   $('photo').value = '';
   $('photoPrev').src = c.photo || ''; $('photoPrev').style.display = c.photo ? 'block' : 'none';
+  $('exifInfo').style.display = 'none';
   renderMethods(); await renderAnglers(); await renderSpeciesList();
   $('sheet').classList.add('open');
 }
@@ -713,6 +793,7 @@ async function usePhoto(f, fromCamera) {
   }
   editing.photo = await resizePhoto(f);
   $('photoPrev').src = editing.photo; $('photoPrev').style.display = 'block';
+  if (!fromCamera) await checkPhotoInfo(f);
 }
 $('photo').onchange = e => { usePhoto(e.target.files[0], true); e.target.value = ''; };
 $('photoGal').onchange = e => { usePhoto(e.target.files[0], false); e.target.value = ''; };
