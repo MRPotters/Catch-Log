@@ -32,7 +32,8 @@
   h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px;
     margin: 18px 0 8px; display: flex; justify-content: space-between; align-items: center; }
   .card { background: var(--panel); border-radius: 14px; padding: 12px; margin-bottom: 10px;
-    display: flex; gap: 12px; }
+    display: flex; gap: 12px; cursor: pointer; }
+  .card:active { background: var(--panel2); }
   .card img { width: 72px; height: 72px; object-fit: cover; border-radius: 10px; flex: none; }
   .card .ph { width: 72px; height: 72px; border-radius: 10px; background: var(--panel2);
     display: grid; place-items: center; font-size: 28px; flex: none; }
@@ -136,9 +137,11 @@ function openDB() {
 function tx(store, mode, fn) {
   return new Promise((res, rej) => {
     const t = db.transaction(store, mode), s = t.objectStore(store);
-    const out = fn(s);
-    t.oncomplete = () => res(out && out.result !== undefined ? out.result : out);
+    const req = fn(s);
+    // Resolve with the request's result (undefined when a key doesn't exist).
+    t.oncomplete = () => res(req ? req.result : undefined);
     t.onerror = () => rej(t.error);
+    t.onabort = () => rej(t.error);
   });
 }
 const put = (store, val, key) => tx(store, 'readwrite', s => key ? s.put(val, key) : s.put(val));
@@ -351,7 +354,7 @@ async function renderList() {
     const ms = d.querySelectorAll('.m');
     ms[0].textContent = [c.method, c.angler].filter(Boolean).join(' · ') || '—';
     ms[1].textContent = `${fmtTime(c.time)} · ${c.moon.name}` + (c.lat == null ? ' · no GPS' : '');
-    d.querySelector('.edit').onclick = () => openSheet(c);
+    d.onclick = () => openSheet(c);   // tap anywhere on the card to edit
     L.appendChild(d);
   });
 }
