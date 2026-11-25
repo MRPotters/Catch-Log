@@ -60,6 +60,9 @@
   .actions button { flex: 1; padding: 14px; font-weight: 700; }
   .save { background: var(--accent); color: #032; }
   .del { background: transparent; color: var(--stop); border: 1px solid var(--stop); }
+  input[type=datetime-local] { width: 100%; font: inherit; padding: 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text); color-scheme: dark; }
+  #map { height: 48vh; min-height: 260px; border-radius: 12px; background: var(--panel); }
   .meta { font-size: 13px; color: var(--muted); background: var(--panel); padding: 10px; border-radius: 10px; }
 </style>
 </head>
@@ -77,6 +80,7 @@
 
 <main>
   <button id="caughtBtn">CAUGHT!</button>
+  <button id="pastBtn" class="small" style="width:100%;margin:-8px 0 8px">＋ Add past catch</button>
 
   <h2>Catches <span class="row">
     <button class="small" id="exportAll">Export (zip)</button>
@@ -88,6 +92,7 @@
 <div class="sheet" id="sheet">
   <div class="inner">
     <div class="meta" id="sheetMeta"></div>
+    <button class="small" id="changeWhereBtn" style="margin-top:8px">📍 Change time / location</button>
 
     <label>Photo</label>
     <input type="file" accept="image/*" capture="environment" id="photo">
@@ -113,6 +118,22 @@
     <div class="actions">
       <button class="del" id="delBtn">Delete</button>
       <button class="save" id="saveBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- time & location picker -->
+<div class="sheet" id="picker" style="z-index:20">
+  <div class="inner">
+    <h2 style="margin-top:0">When &amp; where</h2>
+    <label>Date &amp; time</label>
+    <input type="datetime-local" id="pickTime">
+    <label>Location: tap the map to place the pin (or drag it)</label>
+    <div id="map"></div>
+    <div class="meta" id="pickInfo" style="margin-top:8px"></div>
+    <div class="actions">
+      <button class="del" id="pickCancel">Cancel</button>
+      <button class="save" id="pickOk">Use this</button>
     </div>
   </div>
 </div>
@@ -335,10 +356,11 @@ function weatherText(w) {
 }
 const tideText = d => d ? `${d.stage === 'rising' ? '↗ Rising' : '↘ Falling'} · ${fmtSince(d.mins_since)} after ${d.since} · ${d.height_m} m` : null;
 
-let enriching = false;
+let enriching = false, rerun = false;
 async function enrichAll() {
-  if (enriching || !navigator.onLine || !db) return;
-  enriching = true;
+  if (!navigator.onLine || !db) return;
+  if (enriching) { rerun = true; return; }
+  enriching = true; rerun = false;
   try {
     const key = (await get('settings', 'niwaKey')) || '';
     const cs = await all('catches');
@@ -359,6 +381,7 @@ async function enrichAll() {
       if (dirty) {
         // merge into the latest copy so we don't overwrite edits made meanwhile
         const cur = await get('catches', c.id); if (!cur) continue;
+        if (cur.time !== c.time || cur.lat !== c.lat || cur.lon !== c.lon) { rerun = true; continue; } // moved meanwhile
         for (const k of ['weather', 'tide', 'wErr', 'wMsg', 'tErr', 'tMsg']) {
           if (c[k] === undefined) delete cur[k]; else cur[k] = c[k];
         }
@@ -370,7 +393,7 @@ async function enrichAll() {
       }
     }
     if (changed) renderList();
-  } finally { enriching = false; }
+  } finally { enriching = false; if (rerun) setTimeout(enrichAll, 0); }
 }
 window.addEventListener('online', () => enrichAll());
 setInterval(enrichAll, 5 * 60 * 1000);
@@ -429,10 +452,93 @@ $('caughtBtn').onclick = async () => {
   enrichAll();   // fetch weather & tide now if there's signal, otherwise later
 };
 
+/* ---------- time & location picker (Leaflet + OpenStreetMap) ---------- */
+let map = null, pin = null, pickCb = null, pickLL = null;
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  return new Promise((res, rej) => {
+    const css = document.createElement('link'); css.rel = 'stylesheet';
+    css.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
+    document.head.appendChild(css);
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+    s.onload = res; s.onerror = () => rej(new Error('map failed to load'));
+    document.head.appendChild(s);
+  });
+}
+const toLocalInput = t => { const d = new Date(t);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+function setPin(lat, lon) {
+  pickLL = { lat, lon };
+  if (map) { if (pin) pin.setLatLng([lat, lon]); else {
+    pin = L.marker([lat, lon], { draggable: true }).addTo(map);
+    pin.on('dragend', () => { const p = pin.getLatLng(); setPin(p.lat, p.lng); });
+  } }
+  $('pickInfo').textContent = `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+}
+async function openPicker(start, cb) {
+  pickCb = cb; pickLL = null;
+  $('pickTime').value = toLocalInput(start.time);
+  $('pickTime').max = toLocalInput(Date.now());
+  $('pickInfo').textContent = 'Loading map…';
+  $('picker').classList.add('open');
+  let lat = start.lat, lon = start.lon, zoom = 13;
+  if (lat == null) {
+    const fix = await getFix(6000);
+    if (fix) ({ lat, lon } = fix); else { lat = -36.84; lon = 174.76; zoom = 9; }
+  }
+  try {
+    await loadLeaflet();
+    if (!map) {
+      map = L.map('map');
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 18, attribution: '© OpenStreetMap contributors' }).addTo(map);
+      map.on('click', e => setPin(e.latlng.lat, e.latlng.lng));
+    }
+    map.setView([lat, lon], zoom);
+    setTimeout(() => map.invalidateSize(), 50);
+    if (start.lat != null) setPin(start.lat, start.lon);
+    else { if (pin) { pin.remove(); pin = null; } $('pickInfo').textContent = 'Tap the map where you caught it'; }
+  } catch (e) {
+    $('pickInfo').textContent = 'Map needs signal to load. ' + (start.lat != null ? 'Keeping the existing location.' : '');
+    if (start.lat != null) pickLL = { lat: start.lat, lon: start.lon };
+  }
+}
+function closePicker() { $('picker').classList.remove('open'); pickCb = null; }
+$('pickCancel').onclick = closePicker;
+$('pickOk').onclick = () => {
+  const t = new Date($('pickTime').value).getTime();
+  if (!t) return alert('Pick a date and time');
+  if (t > Date.now() + 60000) return alert("That time is in the future");
+  if (!pickLL) return alert('Tap the map to set where you caught it');
+  const cb = pickCb; closePicker(); cb && cb({ time: t, ...pickLL });
+};
+
+// "Add past catch": choose when/where first, then the normal details sheet.
+$('pastBtn').onclick = () => openPicker({ time: Date.now() - HOUR, lat: null, lon: null }, async w => {
+  const c = { id: uid(), time: w.time, tripId: null, lat: w.lat, lon: w.lon, acc: null, manual: true,
+    moon: moonPhase(w.time), species: '', size: '', method: '', angler: '', notes: '', photo: null,
+    weather: null, tide: null };
+  await put('catches', c);
+  openSheet(c); renderList(); enrichAll();
+});
+
+// Change time/location on an existing catch: clears weather & tide so they're re-fetched.
+$('changeWhereBtn').onclick = () => openPicker({ time: editing.time, lat: editing.lat, lon: editing.lon }, async w => {
+  const cur = await get('catches', editing.id) || { ...editing };
+  const upd = { time: w.time, lat: w.lat, lon: w.lon, acc: null, manual: true, moon: moonPhase(w.time),
+    weather: null, tide: null };
+  Object.assign(cur, upd); Object.assign(editing, upd);
+  for (const k of ['wErr', 'wMsg', 'tErr', 'tMsg']) { delete cur[k]; delete editing[k]; }
+  await put('catches', cur);
+  renderMeta(); renderList(); enrichAll();
+});
+
 function renderMeta() {
   if (!editing) return;
   const c = editing;
-  const loc = c.lat != null ? `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)} (±${c.acc} m)` : 'Getting location…';
+  const loc = c.lat == null ? 'Getting location…'
+    : `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}` + (c.acc != null ? ` (±${c.acc} m)` : ' (set on map)');
   const w = weatherText(c.weather) || (navigator.onLine ? 'Weather: fetching…' : 'Weather: will fill in when back in signal');
   const td = tideText(c.tide) || 'Tide: ' + (c.tMsg ? 'not available yet' : navigator.onLine ? 'fetching…' : 'will fill in when back in signal');
   $('sheetMeta').innerHTML = `<b>${fmtTime(c.time)}</b><br>📍 ${loc}<br>🌙 ${c.moon.name} · ${c.moon.illum}% lit` +
