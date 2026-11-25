@@ -208,6 +208,94 @@ function moonPhase(date) {
   return { age: +age.toFixed(1), illum, name };
 }
 
+/* ---------- sun & moon (Paul Schlyter's method: "How to compute planetary positions") ---------- */
+const RAD = Math.PI / 180, DMS = 86400000;
+const sind = x => Math.sin(x * RAD), cosd = x => Math.cos(x * RAD);
+const norm = x => ((x % 360) + 360) % 360;
+function sky(t) {
+  const d = t / DMS + 2440587.5 - 2451543.5, ecl = 23.4393 - 3.563e-7 * d;
+  // Sun
+  const ws = 282.9404 + 4.70935e-5 * d, es = 0.016709 - 1.151e-9 * d, Ms = norm(356.0470 + 0.9856002585 * d);
+  const Es = Ms + es / RAD * sind(Ms) * (1 + es * cosd(Ms));
+  const xs = cosd(Es) - es, ys = Math.sqrt(1 - es * es) * sind(Es);
+  const sunLon = norm(Math.atan2(ys, xs) / RAD + ws);
+  // Moon
+  const N = norm(125.1228 - 0.0529538083 * d), inc = 5.1454, w = norm(318.0634 + 0.1643573223 * d);
+  const a = 60.2666, e = 0.0549, M = norm(115.3654 + 13.0649929509 * d);
+  let E = M + e / RAD * sind(M) * (1 + e * cosd(M));
+  for (let k = 0; k < 5; k++) E = E - (E - e / RAD * sind(E) - M) / (1 - e * cosd(E));
+  const xv = a * (cosd(E) - e), yv = a * Math.sqrt(1 - e * e) * sind(E);
+  const v = Math.atan2(yv, xv) / RAD; let r = Math.hypot(xv, yv);
+  const xh = r * (cosd(N) * cosd(v + w) - sind(N) * sind(v + w) * cosd(inc));
+  const yh = r * (sind(N) * cosd(v + w) + cosd(N) * sind(v + w) * cosd(inc));
+  const zh = r * sind(v + w) * sind(inc);
+  let lon = Math.atan2(yh, xh) / RAD, lat = Math.atan2(zh, Math.hypot(xh, yh)) / RAD;
+  const Ls = norm(Ms + ws), Lm = norm(M + w + N), D = Lm - Ls, F = Lm - N;
+  lon += -1.274 * sind(M - 2 * D) + 0.658 * sind(2 * D) - 0.186 * sind(Ms) - 0.059 * sind(2 * M - 2 * D)
+       - 0.057 * sind(M - 2 * D + Ms) + 0.053 * sind(M + 2 * D) + 0.046 * sind(2 * D - Ms) + 0.041 * sind(M - Ms)
+       - 0.035 * sind(D) - 0.031 * sind(M + Ms) - 0.015 * sind(2 * F - 2 * D) + 0.011 * sind(M - 4 * D);
+  lat += -0.173 * sind(F - 2 * D) - 0.055 * sind(M - F - 2 * D) - 0.046 * sind(M + F - 2 * D)
+       + 0.033 * sind(F + 2 * D) + 0.017 * sind(2 * M + F);
+  r += -0.58 * cosd(M - 2 * D) - 0.46 * cosd(2 * D);
+  const eq = (lo, la) => {
+    const x = cosd(lo) * cosd(la), y = sind(lo) * cosd(la), z = sind(la);
+    const ye = y * cosd(ecl) - z * sind(ecl), ze = y * sind(ecl) + z * cosd(ecl);
+    return { ra: Math.atan2(ye, x) / RAD, dec: Math.atan2(ze, Math.hypot(x, ye)) / RAD };
+  };
+  const gmst0 = norm(Ls + 180), ut = ((t % DMS) + DMS) % DMS / HOUR;
+  return { sun: eq(sunLon, 0), moon: eq(lon, lat), moonPar: Math.asin(1 / r) / RAD, lst0: gmst0 + ut * 15.04107 };
+}
+const altFrom = (s, b, lat, lon) => {
+  const H = s.lst0 + lon - b.ra;
+  return Math.asin(sind(lat) * sind(b.dec) + cosd(lat) * cosd(b.dec) * cosd(H)) / RAD;
+};
+// Sun: geometric altitude (rise/set at -0.833°). Moon: geocentric altitude minus the
+// rise/set threshold (0.7275 × parallax − 0.5667°), so 0 = moonrise/moonset.
+function sunAlt(t, lat, lon) { const s = sky(t); return altFrom(s, s.sun, lat, lon); }
+function moonAlt(t, lat, lon) { const s = sky(t); return altFrom(s, s.moon, lat, lon) - (0.7275 * s.moonPar - 0.5667); }
+const SUN_H = -0.833, MOON_H = 0, STEP = 5 * 60000;
+
+// Scan ±30 h around the catch for rises, sets and moon transits (overhead / underfoot).
+function findEvents(t, lat, lon) {
+  const ev = [], t0 = t - 30 * HOUR, t1 = t + 30 * HOUR;
+  let ps = sunAlt(t0, lat, lon) - SUN_H, pm = moonAlt(t0, lat, lon), pm2 = moonAlt(t0 - STEP, lat, lon);
+  for (let x = t0 + STEP; x <= t1; x += STEP) {
+    const s = sunAlt(x, lat, lon) - SUN_H, m = moonAlt(x, lat, lon);
+    const cross = (a, b) => x - STEP + STEP * a / (a - b);
+    if (ps < 0 && s >= 0) ev.push({ k: 'sunrise', t: cross(ps, s) });
+    if (ps >= 0 && s < 0) ev.push({ k: 'sunset', t: cross(ps, s) });
+    const a = pm - MOON_H, c = m - MOON_H;
+    if (a < 0 && c >= 0) ev.push({ k: 'moonrise', t: cross(a, c) });
+    if (a >= 0 && c < 0) ev.push({ k: 'moonset', t: cross(a, c) });
+    // local max/min of moon altitude at the previous sample -> refine with a parabola
+    if ((pm > pm2 && pm >= m) || (pm < pm2 && pm <= m)) {
+      const den = pm2 - 2 * pm + m, off = den ? 0.5 * (pm2 - m) / den : 0;
+      ev.push({ k: pm > pm2 ? 'overhead' : 'underfoot', t: x - STEP + off * STEP });
+    }
+    ps = s; pm2 = pm; pm = m;
+  }
+  return ev;
+}
+function astro(t, lat, lon) {
+  const ev = findEvents(t, lat, lon);
+  const d0 = new Date(t); d0.setHours(0, 0, 0, 0);
+  const day0 = d0.getTime(), day1 = day0 + DMS;
+  const inDay = k => { const e = ev.find(e => e.k === k && e.t >= day0 && e.t < day1); return e ? e.t : null; };
+  const nearest = ks => ev.filter(e => ks.includes(e.k))
+    .reduce((best, e) => !best || Math.abs(e.t - t) < Math.abs(best.t - t) ? e : best, null);
+  const sun = nearest(['sunrise', 'sunset']), maj = nearest(['overhead', 'underfoot']), min = nearest(['moonrise', 'moonset']);
+  const mins = e => e ? Math.round((t - e.t) / 60000) : null;   // + = after, - = before
+  const majM = mins(maj), minM = mins(min);
+  return {
+    sunrise: inDay('sunrise'), sunset: inDay('sunset'), moonrise: inDay('moonrise'), moonset: inDay('moonset'),
+    sun_event: sun ? sun.k : null, sun_event_mins: mins(sun),
+    sun_up: sunAlt(t, lat, lon) > SUN_H, moon_up: moonAlt(t, lat, lon) > MOON_H,
+    major_event: maj ? maj.k : null, mins_from_major: majM,
+    minor_event: min ? min.k : null, mins_from_minor: minM,
+    solunar: majM != null && Math.abs(majM) <= 60 ? 'major' : minM != null && Math.abs(minM) <= 30 ? 'minor' : ''
+  };
+}
+
 function getFix(timeout = 15000) {
   return new Promise(res => {
     if (!navigator.geolocation) return res(null);
@@ -347,6 +435,23 @@ async function fetchTide(lat, lon, t, key) {
   };
 }
 
+const hm = t => t == null ? '—' : new Date(t).toLocaleTimeString('en-NZ', { hour: 'numeric', minute: '2-digit' });
+const relMins = m => { const a = Math.abs(m), s = a >= 60 ? `${Math.floor(a / 60)}h ${pad(a % 60)}m` : `${a}m`;
+  return m >= 0 ? `${s} after` : `${s} before`; };
+const EV = { sunrise: 'sunrise', sunset: 'sunset', overhead: 'moon overhead', underfoot: 'moon underfoot',
+  moonrise: 'moonrise', moonset: 'moonset' };
+// [sun line, moon line, sun-event summary, solunar summary]
+function astroText(a) {
+  const sol = a.solunar === 'major' ? `⭐ Major (${relMins(a.mins_from_major)} ${EV[a.major_event]})`
+    : a.solunar === 'minor' ? `✨ Minor (${relMins(a.mins_from_minor)} ${EV[a.minor_event]})`
+    : a.mins_from_major != null ? `Solunar: ${relMins(a.mins_from_major)} ${EV[a.major_event]}` : '';
+  return [
+    `☀️ Rise ${hm(a.sunrise)} · Set ${hm(a.sunset)}`,
+    `🌙 Rise ${hm(a.moonrise)} · Set ${hm(a.moonset)} · moon ${a.moon_up ? 'up' : 'down'}`,
+    a.sun_event ? `☀️ ${relMins(a.sun_event_mins)} ${a.sun_event}` : '',
+    sol
+  ].filter(Boolean);
+}
 const fmtSince = m => `${Math.floor(m / 60)}h ${pad(m % 60)}m`;
 const compass = d => d == null ? '' : ['N','NE','E','SE','S','SW','W','NW'][Math.round(d / 45) % 8];
 function weatherText(w) {
@@ -447,7 +552,10 @@ $('caughtBtn').onclick = async () => {
   openSheet(c);
   // grab the location in the background so the button feels instant
   const fix = await getFix();
-  if (fix) { Object.assign(c, fix); if (editing && editing.id === c.id) Object.assign(editing, fix); await put('catches', c); }
+  if (fix) {
+    const upd = { ...fix, astro: astro(c.time, fix.lat, fix.lon) };
+    Object.assign(c, upd); if (editing && editing.id === c.id) Object.assign(editing, upd); await put('catches', c);
+  }
   renderMeta(); renderList();
   enrichAll();   // fetch weather & tide now if there's signal, otherwise later
 };
@@ -518,7 +626,7 @@ $('pickOk').onclick = () => {
 $('pastBtn').onclick = () => openPicker({ time: Date.now() - HOUR, lat: null, lon: null }, async w => {
   const c = { id: uid(), time: w.time, tripId: null, lat: w.lat, lon: w.lon, acc: null, manual: true,
     moon: moonPhase(w.time), species: '', size: '', method: '', angler: '', notes: '', photo: null,
-    weather: null, tide: null };
+    weather: null, tide: null, astro: astro(w.time, w.lat, w.lon) };
   await put('catches', c);
   openSheet(c); renderList(); enrichAll();
 });
@@ -527,7 +635,7 @@ $('pastBtn').onclick = () => openPicker({ time: Date.now() - HOUR, lat: null, lo
 $('changeWhereBtn').onclick = () => openPicker({ time: editing.time, lat: editing.lat, lon: editing.lon }, async w => {
   const cur = await get('catches', editing.id) || { ...editing };
   const upd = { time: w.time, lat: w.lat, lon: w.lon, acc: null, manual: true, moon: moonPhase(w.time),
-    weather: null, tide: null };
+    weather: null, tide: null, astro: astro(w.time, w.lat, w.lon) };
   Object.assign(cur, upd); Object.assign(editing, upd);
   for (const k of ['wErr', 'wMsg', 'tErr', 'tMsg']) { delete cur[k]; delete editing[k]; }
   await put('catches', cur);
@@ -539,10 +647,10 @@ function renderMeta() {
   const c = editing;
   const loc = c.lat == null ? 'Getting location…'
     : `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}` + (c.acc != null ? ` (±${c.acc} m)` : ' (set on map)');
-  const w = weatherText(c.weather) || (navigator.onLine ? 'Weather: fetching…' : 'Weather: will fill in when back in signal');
+  const w = weatherText(c.weather) || 'Weather: ' + (c.wMsg ? 'not available yet' : navigator.onLine ? 'fetching…' : 'will fill in when back in signal');
   const td = tideText(c.tide) || 'Tide: ' + (c.tMsg ? 'not available yet' : navigator.onLine ? 'fetching…' : 'will fill in when back in signal');
   $('sheetMeta').innerHTML = `<b>${fmtTime(c.time)}</b><br>📍 ${loc}<br>🌙 ${c.moon.name} · ${c.moon.illum}% lit` +
-    `<br>🌬️ ${w}<br>🌊 ${td}`;
+    `<br>🌬️ ${w}<br>🌊 ${td}` + (c.astro ? `<br>${astroText(c.astro).join('<br>')}` : '');
 }
 
 async function openSheet(c) {
@@ -628,7 +736,8 @@ async function renderList() {
     const ms = d.querySelectorAll('.m');
     ms[0].textContent = [c.method, c.angler].filter(Boolean).join(' · ') || '—';
     ms[1].textContent = `${fmtTime(c.time)} · ${c.moon.name}` + (c.lat == null ? ' · no GPS' : '');
-    const wt = [weatherText(c.weather), tideText(c.tide)].filter(Boolean).join('\n');
+    const wt = [weatherText(c.weather), tideText(c.tide), c.astro ? astroText(c.astro).slice(2).join(' · ') : null]
+      .filter(Boolean).join('\n');
     const m3 = document.createElement('div'); m3.className = 'm'; m3.style.whiteSpace = 'pre-line';
     m3.textContent = wt || (c.lat == null ? '' : '⏳ weather & tide pending');
     ms[1].after(m3);
@@ -702,12 +811,18 @@ $('exportAll').onclick = async () => {
     'species', 'size_cm', 'method', 'caught_by', 'moon_phase', 'moon_illum_pct', 'moon_age_days',
     'air_temp_c', 'wind_kn', 'wind_dir_deg', 'gust_kn', 'pressure_hpa', 'pressure_change_3h', 'cloud_pct', 'rain_mm',
     'tide_height_m', 'tide_stage', 'tide_since', 'tide_mins_since', 'tide_prev_time_utc', 'tide_next_time_utc',
+    'sunrise', 'sunset', 'moonrise', 'moonset', 'sun_up', 'moon_up', 'nearest_sun_event', 'mins_from_sun_event',
+    'solunar_period', 'nearest_major', 'mins_from_major', 'nearest_minor', 'mins_from_minor',
     'notes', 'photo_file'];
+  const A = ['sunrise', 'sunset', 'moonrise', 'moonset', 'sun_up', 'moon_up', 'sun_event', 'sun_event_mins',
+    'solunar', 'major_event', 'mins_from_major', 'minor_event', 'mins_from_minor'];
+  const aVal = (a, k) => !a ? '' : ['sunrise', 'sunset', 'moonrise', 'moonset'].includes(k) ? (a[k] ? hm(a[k]) : '') : a[k];
   const W = ['air_temp_c', 'wind_kn', 'wind_dir_deg', 'gust_kn', 'pressure_hpa', 'pressure_change_3h', 'cloud_pct', 'rain_mm'];
   const T = ['height_m', 'stage', 'since', 'mins_since', 'prev_time', 'next_time'];
   const rows = cs.map(c => [c.id, c.tripId, new Date(c.time).toLocaleString('en-NZ'), new Date(c.time).toISOString(),
     c.lat, c.lon, c.acc, c.species, c.size, c.method, c.angler, c.moon.name, c.moon.illum, c.moon.age,
     ...W.map(k => c.weather ? c.weather[k] : ''), ...T.map(k => c.tide ? c.tide[k] : ''),
+    ...A.map(k => aVal(c.astro, k)),
     c.notes, c.photo ? photoName(c) : '']);
   const ts = await all('trips');
   const trows = [['trip_id', 'trip_start_utc', 'point_time_utc', 'lat', 'lon']];
@@ -726,6 +841,9 @@ $('exportAll').onclick = async () => {
   db = await openDB();
   const active = await get('settings', 'activeTrip');
   if (active) { trip = await get('trips', active); if (trip) beginWatch(); }
+  // fill in sun/moon times for older catches (worked out on the phone, no signal needed)
+  for (const c of await all('catches'))
+    if (!c.astro && c.lat != null) { c.astro = astro(c.time, c.lat, c.lon); await put('catches', c); }
   renderTrip(); renderList(); enrichAll();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
 })();
