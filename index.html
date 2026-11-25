@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b2233">
+<title>Catch Log</title>
+<style>
+  :root {
+    --bg: #0b2233; --panel: #12324a; --panel2: #18405e; --text: #eef5fa;
+    --muted: #9bb6c9; --accent: #2ec4a6; --warn: #f2a541; --stop: #e5484d; --line: #24506f;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.4 system-ui, -apple-system, Roboto, sans-serif; padding-bottom: 40px; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--bg);
+    padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 18px; margin: 0 0 8px; letter-spacing: .3px; }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .status { font-size: 13px; color: var(--muted); margin-top: 6px; min-height: 18px; }
+  button { font: inherit; border: 0; border-radius: 12px; padding: 12px 14px;
+    background: var(--panel2); color: var(--text); cursor: pointer; }
+  button:active { transform: scale(.98); }
+  .trip-btn { flex: 1; font-weight: 600; }
+  .start { background: var(--accent); color: #032; }
+  .stop { background: var(--stop); }
+  main { padding: 16px; max-width: 640px; margin: 0 auto; }
+  #caughtBtn { width: 100%; height: 150px; font-size: 34px; font-weight: 800;
+    border-radius: 24px; background: var(--warn); color: #2a1600; margin: 8px 0 20px;
+    box-shadow: 0 6px 0 #b9771f; }
+  #caughtBtn:active { box-shadow: 0 2px 0 #b9771f; transform: translateY(4px); }
+  h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px;
+    margin: 18px 0 8px; display: flex; justify-content: space-between; align-items: center; }
+  .card { background: var(--panel); border-radius: 14px; padding: 12px; margin-bottom: 10px;
+    display: flex; gap: 12px; }
+  .card img { width: 72px; height: 72px; object-fit: cover; border-radius: 10px; flex: none; }
+  .card .ph { width: 72px; height: 72px; border-radius: 10px; background: var(--panel2);
+    display: grid; place-items: center; font-size: 28px; flex: none; }
+  .card .t { font-weight: 600; }
+  .card .m { font-size: 13px; color: var(--muted); }
+  .card .edit { margin-left: auto; align-self: flex-start; padding: 6px 10px; font-size: 13px; }
+  .empty { color: var(--muted); text-align: center; padding: 20px; }
+  .small { padding: 8px 12px; font-size: 14px; }
+  /* sheet */
+  .sheet { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; z-index: 10; }
+  .sheet.open { display: block; }
+  .sheet .inner { position: absolute; left: 0; right: 0; bottom: 0; max-height: 92vh; overflow: auto;
+    background: var(--bg); border-radius: 18px 18px 0 0; padding: 16px; max-width: 640px; margin: 0 auto; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+  input[type=text], input[type=number], textarea { width: 100%; font: inherit; padding: 12px;
+    border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .chip { padding: 14px 8px; font-size: 15px; text-align: center; }
+  .chip.on { background: var(--accent); color: #032; font-weight: 700; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chips .chip { padding: 10px 14px; }
+  .photo-prev { width: 100%; max-height: 240px; object-fit: cover; border-radius: 12px; margin-top: 8px; display: none; }
+  .actions { display: flex; gap: 10px; margin-top: 18px; }
+  .actions button { flex: 1; padding: 14px; font-weight: 700; }
+  .save { background: var(--accent); color: #032; }
+  .del { background: transparent; color: var(--stop); border: 1px solid var(--stop); }
+  .meta { font-size: 13px; color: var(--muted); background: var(--panel); padding: 10px; border-radius: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎣 Catch Log</h1>
+  <div class="row">
+    <button id="tripBtn" class="trip-btn start">Start trip</button>
+  </div>
+  <div class="status" id="status">No trip running</div>
+</header>
+
+<main>
+  <button id="caughtBtn">CAUGHT!</button>
+
+  <h2>Catches <span class="row">
+    <button class="small" id="exportCatches">Export catches</button>
+    <button class="small" id="exportTracks">Export tracks</button>
+  </span></h2>
+  <div id="list"></div>
+</main>
+
+<!-- details sheet -->
+<div class="sheet" id="sheet">
+  <div class="inner">
+    <div class="meta" id="sheetMeta"></div>
+
+    <label>Photo</label>
+    <input type="file" accept="image/*" capture="environment" id="photo">
+    <img class="photo-prev" id="photoPrev" alt="">
+
+    <label>Species</label>
+    <input type="text" id="species" list="speciesList" placeholder="e.g. Snapper">
+    <datalist id="speciesList"></datalist>
+
+    <label>Size (cm)</label>
+    <input type="number" id="size" inputmode="decimal" placeholder="e.g. 42">
+
+    <label>Method</label>
+    <div class="grid" id="methods"></div>
+
+    <label>Caught by</label>
+    <div class="chips" id="anglers"></div>
+    <input type="text" id="newAngler" placeholder="Add a name…" style="margin-top:8px">
+
+    <label>Notes</label>
+    <textarea id="notes" rows="2" placeholder="Optional"></textarea>
+
+    <div class="actions">
+      <button class="del" id="delBtn">Delete</button>
+      <button class="save" id="saveBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const METHODS = ['Bait – ledger', 'Bait – strayline', 'Soft bait', 'Lure', 'Jig', 'Topwater'];
+const TRACK_INTERVAL_MS = 60 * 1000; // save a track point at most once a minute
+
+/* ---------- IndexedDB ---------- */
+let db;
+function openDB() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('catchlog', 1);
+    r.onupgradeneeded = () => {
+      const d = r.result;
+      d.createObjectStore('catches', { keyPath: 'id' });
+      d.createObjectStore('trips', { keyPath: 'id' });
+      d.createObjectStore('settings');
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+function tx(store, mode, fn) {
+  return new Promise((res, rej) => {
+    const t = db.transaction(store, mode), s = t.objectStore(store);
+    const out = fn(s);
+    t.oncomplete = () => res(out && out.result !== undefined ? out.result : out);
+    t.onerror = () => rej(t.error);
+  });
+}
+const put = (store, val, key) => tx(store, 'readwrite', s => key ? s.put(val, key) : s.put(val));
+const del = (store, key) => tx(store, 'readwrite', s => s.delete(key));
+const get = (store, key) => tx(store, 'readonly', s => s.get(key));
+const all = store => tx(store, 'readonly', s => s.getAll());
+
+/* ---------- helpers ---------- */
+const $ = id => document.getElementById(id);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const fmtTime = t => new Date(t).toLocaleString('en-NZ', { dateStyle: 'medium', timeStyle: 'short' });
+
+// Moon phase from a reference new moon (6 Jan 2000 18:14 UTC), mean synodic month.
+function moonPhase(date) {
+  const synodic = 29.530588853;
+  const ref = Date.UTC(2000, 0, 6, 18, 14);
+  let age = ((date - ref) / 86400000) % synodic;
+  if (age < 0) age += synodic;
+  const illum = Math.round((1 - Math.cos(2 * Math.PI * age / synodic)) / 2 * 100);
+  const names = ['New moon', 'Waxing crescent', 'First quarter', 'Waxing gibbous',
+                 'Full moon', 'Waning gibbous', 'Last quarter', 'Waning crescent'];
+  const name = names[Math.floor((age / synodic) * 8 + 0.5) % 8];
+  return { age: +age.toFixed(1), illum, name };
+}
+
+function getFix(timeout = 15000) {
+  return new Promise(res => {
+    if (!navigator.geolocation) return res(null);
+    navigator.geolocation.getCurrentPosition(
+      p => res({ lat: p.coords.latitude, lon: p.coords.longitude, acc: Math.round(p.coords.accuracy) }),
+      () => res(null),
+      { enableHighAccuracy: true, timeout, maximumAge: 10000 });
+  });
+}
+
+function resizePhoto(file, max = 1280) {
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = img.width * k; c.height = img.height * k;
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      res(c.toDataURL('image/jpeg', 0.8));
+      URL.revokeObjectURL(img.src);
+    };
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+/* ---------- trip tracking ---------- */
+let trip = null, watchId = null, lastPoint = 0, wakeLock = null;
+
+async function startTrip() {
+  trip = { id: uid(), start: Date.now(), end: null, track: [] };
+  await put('trips', trip);
+  await put('settings', trip.id, 'activeTrip');
+  beginWatch();
+  renderTrip();
+}
+async function stopTrip() {
+  if (!trip) return;
+  if (!confirm('End this trip?')) return;
+  trip.end = Date.now();
+  await put('trips', trip);
+  await del('settings', 'activeTrip');
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  watchId = null; trip = null;
+  releaseWake();
+  renderTrip();
+}
+function beginWatch() {
+  if (!navigator.geolocation) return;
+  watchId = navigator.geolocation.watchPosition(async p => {
+    const now = Date.now();
+    if (now - lastPoint < TRACK_INTERVAL_MS || !trip) return;
+    lastPoint = now;
+    trip.track.push({ t: now, lat: +p.coords.latitude.toFixed(6), lon: +p.coords.longitude.toFixed(6) });
+    await put('trips', trip);
+    renderTrip();
+  }, err => setStatus('GPS: ' + err.message), { enableHighAccuracy: true, maximumAge: 15000 });
+  requestWake();
+}
+// Keep the screen awake during a trip so tracking keeps going (where supported).
+async function requestWake() {
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+}
+function releaseWake() { try { wakeLock && wakeLock.release(); } catch {} wakeLock = null; }
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && trip) requestWake();
+});
+
+function setStatus(s) { $('status').textContent = s; }
+function renderTrip() {
+  const b = $('tripBtn');
+  if (trip) {
+    b.textContent = 'Stop trip'; b.className = 'trip-btn stop';
+    const mins = Math.round((Date.now() - trip.start) / 60000);
+    setStatus(`Trip running · ${mins} min · ${trip.track.length} track points`);
+  } else {
+    b.textContent = 'Start trip'; b.className = 'trip-btn start';
+    setStatus('No trip running');
+  }
+}
+$('tripBtn').onclick = () => trip ? stopTrip() : startTrip();
+setInterval(() => trip && renderTrip(), 30000);
+
+/* ---------- catches ---------- */
+let editing = null;
+
+$('caughtBtn').onclick = async () => {
+  const t = Date.now();
+  const c = {
+    id: uid(), time: t, tripId: trip ? trip.id : null,
+    lat: null, lon: null, acc: null,
+    moon: moonPhase(t),
+    species: '', size: '', method: '', angler: '', notes: '', photo: null,
+    weather: null, tide: null   // to be filled in a later version
+  };
+  await put('catches', c);
+  openSheet(c);
+  // grab the location in the background so the button feels instant
+  const fix = await getFix();
+  if (fix) { Object.assign(c, fix); if (editing && editing.id === c.id) Object.assign(editing, fix); await put('catches', c); }
+  renderMeta(); renderList();
+};
+
+function renderMeta() {
+  if (!editing) return;
+  const c = editing;
+  const loc = c.lat != null ? `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)} (±${c.acc} m)` : 'Getting location…';
+  $('sheetMeta').innerHTML = `<b>${fmtTime(c.time)}</b><br>📍 ${loc}<br>🌙 ${c.moon.name} · ${c.moon.illum}% lit`;
+}
+
+async function openSheet(c) {
+  editing = { ...c };
+  renderMeta();
+  $('species').value = c.species; $('size').value = c.size; $('notes').value = c.notes;
+  $('photo').value = '';
+  $('photoPrev').src = c.photo || ''; $('photoPrev').style.display = c.photo ? 'block' : 'none';
+  renderMethods(); await renderAnglers(); await renderSpeciesList();
+  $('sheet').classList.add('open');
+}
+function closeSheet() { $('sheet').classList.remove('open'); editing = null; }
+
+function renderMethods() {
+  $('methods').innerHTML = '';
+  METHODS.forEach(m => {
+    const b = document.createElement('button');
+    b.className = 'chip' + (editing.method === m ? ' on' : '');
+    b.textContent = m;
+    b.onclick = () => { editing.method = editing.method === m ? '' : m; renderMethods(); };
+    $('methods').appendChild(b);
+  });
+}
+async function renderAnglers() {
+  const names = (await get('settings', 'anglers')) || [];
+  $('anglers').innerHTML = '';
+  names.forEach(n => {
+    const b = document.createElement('button');
+    b.className = 'chip' + (editing.angler === n ? ' on' : '');
+    b.textContent = n;
+    b.onclick = () => { editing.angler = editing.angler === n ? '' : n; renderAnglers(); };
+    $('anglers').appendChild(b);
+  });
+}
+$('newAngler').onchange = async e => {
+  const n = e.target.value.trim(); if (!n) return;
+  const names = (await get('settings', 'anglers')) || [];
+  if (!names.includes(n)) { names.push(n); await put('settings', names, 'anglers'); }
+  editing.angler = n; e.target.value = '';
+  renderAnglers();
+};
+async function renderSpeciesList() {
+  const cs = await all('catches');
+  const set = [...new Set(cs.map(c => c.species).filter(Boolean))];
+  $('speciesList').innerHTML = set.map(s => `<option value="${s.replace(/"/g, '&quot;')}">`).join('');
+}
+$('photo').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  editing.photo = await resizePhoto(f);
+  $('photoPrev').src = editing.photo; $('photoPrev').style.display = 'block';
+};
+$('saveBtn').onclick = async () => {
+  const latest = await get('catches', editing.id) || {};
+  Object.assign(editing, {
+    lat: latest.lat ?? editing.lat, lon: latest.lon ?? editing.lon, acc: latest.acc ?? editing.acc,
+    species: $('species').value.trim(), size: $('size').value, notes: $('notes').value.trim()
+  });
+  await put('catches', editing);
+  closeSheet(); renderList();
+};
+$('delBtn').onclick = async () => {
+  if (!confirm('Delete this catch?')) return;
+  await del('catches', editing.id); closeSheet(); renderList();
+};
+$('sheet').onclick = e => { if (e.target.id === 'sheet') $('saveBtn').click(); };
+
+async function renderList() {
+  const cs = (await all('catches')).sort((a, b) => b.time - a.time);
+  const L = $('list');
+  if (!cs.length) { L.innerHTML = '<div class="empty">No catches yet. Tight lines!</div>'; return; }
+  L.innerHTML = '';
+  cs.forEach(c => {
+    const d = document.createElement('div'); d.className = 'card';
+    d.innerHTML = `${c.photo ? `<img src="${c.photo}" alt="">` : '<div class="ph">🐟</div>'}
+      <div><div class="t"></div><div class="m"></div><div class="m"></div></div>
+      <button class="edit">Edit</button>`;
+    d.querySelector('.t').textContent = (c.species || 'Unknown species') + (c.size ? ` · ${c.size} cm` : '');
+    const ms = d.querySelectorAll('.m');
+    ms[0].textContent = [c.method, c.angler].filter(Boolean).join(' · ') || '—';
+    ms[1].textContent = `${fmtTime(c.time)} · ${c.moon.name}` + (c.lat == null ? ' · no GPS' : '');
+    d.querySelector('.edit').onclick = () => openSheet(c);
+    L.appendChild(d);
+  });
+}
+
+/* ---------- export ---------- */
+function csvCell(v) { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; }
+function download(name, text) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
+  a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+const stamp = () => new Date().toISOString().slice(0, 10);
+
+$('exportCatches').onclick = async () => {
+  const cs = (await all('catches')).sort((a, b) => a.time - b.time);
+  const head = ['id', 'trip_id', 'datetime_local', 'datetime_utc', 'lat', 'lon', 'gps_accuracy_m',
+    'species', 'size_cm', 'method', 'caught_by', 'moon_phase', 'moon_illum_pct', 'moon_age_days',
+    'weather', 'tide', 'notes', 'has_photo'];
+  const rows = cs.map(c => [c.id, c.tripId, new Date(c.time).toLocaleString('en-NZ'), new Date(c.time).toISOString(),
+    c.lat, c.lon, c.acc, c.species, c.size, c.method, c.angler, c.moon.name, c.moon.illum, c.moon.age,
+    c.weather ? JSON.stringify(c.weather) : '', c.tide ? JSON.stringify(c.tide) : '', c.notes, c.photo ? 'yes' : 'no']);
+  download(`catches-${stamp()}.csv`, [head, ...rows].map(r => r.map(csvCell).join(',')).join('\n'));
+};
+$('exportTracks').onclick = async () => {
+  const ts = await all('trips');
+  const rows = [['trip_id', 'trip_start_utc', 'point_time_utc', 'lat', 'lon']];
+  ts.forEach(t => t.track.forEach(p => rows.push([t.id, new Date(t.start).toISOString(), new Date(p.t).toISOString(), p.lat, p.lon])));
+  download(`tracks-${stamp()}.csv`, rows.map(r => r.map(csvCell).join(',')).join('\n'));
+};
+
+/* ---------- boot ---------- */
+(async () => {
+  db = await openDB();
+  const active = await get('settings', 'activeTrip');
+  if (active) { trip = await get('trips', active); if (trip) beginWatch(); }
+  renderTrip(); renderList();
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+})();
+</script>
+</body>
+</html>
