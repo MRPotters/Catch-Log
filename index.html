@@ -46,6 +46,8 @@
   .trip-date { font-weight: 700; }
   .trip-sub, .trip-sum { font-size: 13px; color: var(--muted); }
   .trip-tog { padding: 4px 12px; font-size: 18px; line-height: 1; }
+  .trip-note { font-size: 14px; padding: 5px 8px; opacity: .5; }
+  .trip-note.on { opacity: 1; background: var(--accent); }
   .trip.shut .trip-body { display: none; }
   .trip.shut .trip-head { padding-bottom: 2px; }
   .trip-head .lb-mode { padding: 5px 10px; font-size: 13px; line-height: 1.2; }
@@ -137,6 +139,10 @@
     <div class="chips" id="anglers"></div>
     <input type="text" id="newAngler" placeholder="Add a name…" style="margin-top:8px">
 
+    <label class="row" style="gap:10px;color:var(--text);font-size:15px;margin-top:16px">
+      <input type="checkbox" id="released" style="width:22px;height:22px"> Released (let go / undersize)
+    </label>
+
     <label>Notes</label>
     <textarea id="notes" rows="2" placeholder="Optional"></textarea>
 
@@ -163,6 +169,18 @@
   </div>
 </div>
 
+<!-- trip notes -->
+<div class="sheet" id="tripNotes" style="z-index:15">
+  <div class="inner">
+    <h2 style="margin-top:0" id="tripNotesTitle">Trip notes</h2>
+    <textarea id="tripNotesText" rows="6" placeholder="How did the trip go? Spots, bait, conditions, what worked…"></textarea>
+    <div class="actions">
+      <button class="del" id="tripNotesCancel">Cancel</button>
+      <button class="save" id="tripNotesSave">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- settings sheet -->
 <div class="sheet" id="settings">
   <div class="inner">
@@ -174,6 +192,15 @@
       <button id="testBtn">Test weather &amp; tide</button>
     </div>
     <div class="meta" id="testOut" style="margin-top:10px;display:none;white-space:pre-line"></div>
+
+    <label style="margin-top:22px">Spreadsheet (Trips + Catches)</label>
+    <div class="row">
+      <button style="flex:1" id="xlsxOut">⬇️ Export</button>
+      <button style="flex:1" id="xlsxIn">⬆️ Import</button>
+    </div>
+    <input type="file" id="xlsxFile" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
+    <div class="meta" style="margin-top:8px">Export gives you a spreadsheet you can fill in on a computer and import back. Rows with an ID update that record; rows without one are added. Photos aren't included. Dates are day/month/year.</div>
+    <div class="meta" id="xlsxOutMsg" style="margin-top:8px;display:none;white-space:pre-line"></div>
     <div class="actions">
       <button class="save" id="settingsSave">Done</button>
     </div>
@@ -496,7 +523,7 @@ async function enrichAll() {
     const cs = await all('catches');
     let changed = false;
     for (const c of cs) {
-      if (c.lat == null) continue;
+      if (c.lat == null || c.timeUnknown) continue;
       let dirty = false;
       if (!c.weather && (c.wErr || 0) < MAX_TRIES) {
         try { c.weather = await fetchWeather(c.lat, c.lon, c.time); delete c.wErr; delete c.wMsg; }
@@ -764,6 +791,11 @@ function renderMeta() {
     return;
   }
   $('changeWhereBtn').textContent = '📍 Change time / location';
+  if (c.timeUnknown || c.lat == null && !c.draft && c.acc == null && c.manual === 'import') {
+    $('sheetMeta').innerHTML = `<b>${fmtDay(c.time)}${c.timeUnknown ? ' · time unknown' : ' ' + hm(c.time)}</b><br>` +
+      `📍 ${c.lat == null ? 'No location' : `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}`}<br>Imported catch. Set a time and spot to get weather, tide and sun/moon.`;
+    return;
+  }
   const loc = c.lat == null ? 'Getting location…'
     : `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}` + (c.acc != null ? ` (±${c.acc} m)` : c.manual === 'photo' ? ' (from photo)' : ' (set on map)');
   const w = weatherText(c.weather) || 'Weather: ' + (c.wMsg ? 'not available yet' : navigator.onLine ? 'fetching…' : 'will fill in when back in signal');
@@ -775,7 +807,7 @@ function renderMeta() {
 async function openSheet(c) {
   editing = { ...c };
   renderMeta();
-  $('species').value = c.species; $('size').value = c.size; $('weight').value = c.weight || ''; $('notes').value = c.notes;
+  $('species').value = c.species; $('size').value = c.size; $('weight').value = c.weight || ''; $('notes').value = c.notes; $('released').checked = !!c.released;
   $('photo').value = '';
   $('photoPrev').src = c.photo || ''; $('photoPrev').style.display = c.photo ? 'block' : 'none';
   $('exifInfo').style.display = 'none';
@@ -845,7 +877,7 @@ $('saveBtn').onclick = async () => {
     lat: latest.lat ?? editing.lat, lon: latest.lon ?? editing.lon, acc: latest.acc ?? editing.acc,
     weather: latest.weather ?? editing.weather, tide: latest.tide ?? editing.tide,
     wErr: latest.wErr, wMsg: latest.wMsg, tErr: latest.tErr, tMsg: latest.tMsg,
-    species: $('species').value.trim(), size: $('size').value, weight: $('weight').value, notes: $('notes').value.trim()
+    species: $('species').value.trim(), size: $('size').value, weight: $('weight').value, released: $('released').checked, notes: $('notes').value.trim()
   });
   await put('catches', editing);
   closeSheet(); renderList();
@@ -868,14 +900,14 @@ function catchCard(c) {
   d.innerHTML = `${c.photo ? `<img src="${c.photo}" alt="">` : '<div class="ph">🐟</div>'}
     <div><div class="t"></div><div class="m"></div><div class="m"></div></div>
     <button class="edit">Edit</button>`;
-  d.querySelector('.t').textContent = (c.species || 'Unknown species') + (c.size ? ` · ${c.size} cm` : '') + (c.weight ? ` · ${c.weight} kg` : '');
+  d.querySelector('.t').textContent = (c.species || 'Unknown species') + (c.size ? ` · ${c.size} cm` : '') + (c.weight ? ` · ${c.weight} kg` : '') + (c.released ? ' · released' : '');
   const ms = d.querySelectorAll('.m');
   ms[0].textContent = [c.method, c.angler].filter(Boolean).join(' · ') || '—';
-  ms[1].textContent = `${hm(c.time)} · ${c.moon.name}` + (c.lat == null ? ' · no GPS' : '');
+  ms[1].textContent = c.timeUnknown ? 'Time unknown' : `${hm(c.time)} · ${c.moon.name}` + (c.lat == null ? ' · no GPS' : '');
   const wt = [weatherText(c.weather), tideText(c.tide), c.astro ? astroText(c.astro).slice(2).join(' · ') : null]
     .filter(Boolean).join('\n');
   const m3 = document.createElement('div'); m3.className = 'm'; m3.style.whiteSpace = 'pre-line';
-  m3.textContent = wt || (c.lat == null ? '' : '⏳ weather & tide pending');
+  m3.textContent = wt || (c.lat == null || c.timeUnknown ? '' : '⏳ weather & tide pending');
   ms[1].after(m3);
   d.onclick = () => openSheet(c);   // tap anywhere on the card to edit
   return d;
@@ -897,6 +929,7 @@ async function renderList() {
     return groups.get(key);
   };
   if (trip) tripGroup(trip);                       // show a running trip even before the first fish
+  trips.filter(t => t.summary || t.notes).forEach(tripGroup); // imported trips and trips with notes
   for (const c of cs) {
     let t = c.tripId && trips.find(x => x.id === c.tripId);
     if (!t) t = trips.find(x => c.time >= x.start && c.time <= (x.end || Date.now()));
@@ -919,32 +952,226 @@ async function renderList() {
     const shut = collapsed.has(g.key);
     if (shut) box.classList.add('shut');
     const first = g.trip ? g.trip.start : Math.min(...g.catches.map(c => c.time));
-    const n = g.catches.length;
+    const S = g.trip && g.trip.imported ? g.trip.summary : null;   // imported trips carry counts
+    const rel = g.catches.filter(c => c.released).length;
+    const n = S ? (S.fish ?? 0) : g.catches.length - rel;
     const kinds = {};
-    g.catches.forEach(c => { const k = c.species || 'Unknown'; kinds[k] = (kinds[k] || 0) + 1; });
-    const summary = Object.entries(kinds).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${v} ${k.toLowerCase()}`).join(', ');
-    const when = g.trip
-      ? (g.trip.end ? `${hm(g.trip.start)} – ${hm(g.trip.end)}` : `Started ${hm(g.trip.start)} · in progress`)
+    if (S) Object.entries(S.species || {}).forEach(([k, v]) => { if (v && !BAIT.includes(k.toLowerCase())) kinds[k] = v; });
+    else g.catches.forEach(c => { const k = c.species || 'Unknown'; kinds[k] = (kinds[k] || 0) + 1; });
+    let summary = Object.entries(kinds).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${v} ${k.toLowerCase()}`).join(', ');
+    if (S && S.bait) {
+      const bk = Object.entries(S.species || {}).filter(([k, v]) => v && BAIT.includes(k.toLowerCase())).map(([k]) => k.toLowerCase());
+      summary += `${summary ? ' · ' : ''}${S.bait} bait${bk.length ? ` (${bk.join(', ')})` : ''}`;
+    }
+    if (!S && rel) summary += ` · ${rel} released`;
+    const loc = g.trip && g.trip.summary && g.trip.summary.location ? ' · ' + g.trip.summary.location : '';
+    const when = g.trip && g.trip.auto ? 'No trip logged'
+      : g.trip
+      ? (g.trip.end ? `${hm(g.trip.start)} – ${hm(g.trip.end)}` : `Started ${hm(g.trip.start)} · in progress`) + loc
       : 'No trip logged';
+    const noteText = g.trip && g.trip.notes ? g.trip.notes : '';
     box.innerHTML = `<div class="trip-head">
         <div><div class="trip-date"></div><div class="trip-sub"></div><div class="trip-sum"></div></div>
-        <button class="trip-tog" aria-label="Minimise">${shut ? '▸' : '▾'}</button>
+        <div class="row" style="flex:none;gap:6px">
+          <button class="trip-tog trip-note ${noteText ? 'on' : ''}" aria-label="Trip notes">💬</button>
+          <button class="trip-tog" aria-label="Minimise">${shut ? '▸' : '▾'}</button>
+        </div>
       </div><div class="trip-body"></div>`;
     box.querySelector('.trip-date').textContent = `${fmtDay(first)} · ${n} fish`;
     box.querySelector('.trip-sub').textContent = when;
-    box.querySelector('.trip-sum').textContent = n ? summary : '';
+    box.querySelector('.trip-sum').textContent = summary;
     box.querySelector('.trip-head').onclick = async () => {
       const set = new Set((await get('settings', 'collapsed')) || []);
       if (set.has(g.key)) set.delete(g.key); else set.add(g.key);
       await put('settings', [...set], 'collapsed');
       renderList();
     };
+    box.querySelector('.trip-note').onclick = e => { e.stopPropagation(); openTripNotes(g, first); };
     const body = box.querySelector('.trip-body');
-    if (!n) body.innerHTML = '<div class="empty" style="padding:10px">No fish yet</div>';
+    if (noteText) { const m = document.createElement('div'); m.className = 'meta'; m.style.cssText = 'margin-bottom:8px;white-space:pre-line;color:var(--text)';
+      m.textContent = '💬 ' + noteText; m.onclick = () => openTripNotes(g, first); body.appendChild(m); }
+    const T = g.trip && g.trip.summary;
+    if (T) {
+      const bits = [T.technique, T.avg != null || T.largest != null ? [T.avg != null ? `avg ${T.avg} cm` : '', T.largest != null ? `largest ${T.largest} cm` : ''].filter(Boolean).join(', ') : '',
+        T.tideStart || T.tideEnd ? `Tide ${T.tideStart || '?'} → ${T.tideEnd || '?'}` : '', T.moonNote, T.weather].filter(Boolean);
+      if (bits.length) { const m = document.createElement('div'); m.className = 'meta'; m.style.marginBottom = '8px';
+        m.textContent = bits.join(' · '); body.appendChild(m); }
+    }
+    if (!g.catches.length && !T) body.insertAdjacentHTML('beforeend', '<div class="empty" style="padding:10px">No fish yet</div>');
     g.catches.forEach(c => body.appendChild(catchCard(c)));
     L.appendChild(box);
   }
 }
+
+/* ---------- spreadsheet export / import (SheetJS) ---------- */
+const BAIT = ['koheru', 'mackerel', 'mackrel', 'jack mackerel', 'pilchard', 'yellowtail'];
+const TRIP_SPECIES = ['Snapper', 'Trevally', 'Kahawai', 'Koheru', 'Kingfish', 'Mackerel'];
+const TRIP_COLS = ['Trip ID', 'Date', 'Start Time', 'End Time', 'Location', 'Tide State (Start)', 'Tide State (End)',
+  'Moon Phase', 'Weather Notes', '# of Fish', '# of Bait Fish', 'Avg Size (cm)', 'Largest Size (cm)', 'Notes / Technique', ...TRIP_SPECIES, 'Trip Notes'];
+const CATCH_COLS = ['Catch ID', 'Trip ID', 'Date', 'Time', 'Species', 'Length (cm)', 'Weight (kg)', 'Method', 'Caught By',
+  'Released (Y/N)', 'Latitude', 'Longitude', 'Notes'];
+function loadXLSX() {
+  if (window.XLSX) return Promise.resolve();
+  return new Promise((res, rej) => { const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    s.onload = res; s.onerror = () => rej(new Error('spreadsheet tool needs signal to load')); document.head.appendChild(s); });
+}
+// Excel serials in local time (avoids time-zone shifts)
+const toSerial = t => { const d = new Date(t); return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes()) / DMS + 25569; };
+const dateSerial = t => Math.floor(toSerial(t));
+const timeSerial = t => toSerial(t) - dateSerial(t);
+function fromSerial(n) { const d = new Date(Math.round((n - 25569) * DMS));
+  return { y: d.getUTCFullYear(), m: d.getUTCMonth(), d: d.getUTCDate(), h: d.getUTCHours(), mi: d.getUTCMinutes() }; }
+function readDate(v) {               // -> {y,m,d} ; text is read as day/month/year
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') { const x = fromSerial(v); return { y: x.y, m: x.m, d: x.d }; }
+  const m = String(v).trim().match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/) ;
+  if (m) { let y = +m[3]; if (y < 100) y += 2000; return { y, m: +m[2] - 1, d: +m[1] }; }
+  const iso = String(v).trim().match(/^(\d{4})-(\d\d)-(\d\d)/); if (iso) return { y: +iso[1], m: +iso[2] - 1, d: +iso[3] };
+  return null;
+}
+function readTime(v) {               // -> {h,mi}
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') { const x = fromSerial(v % 1); return { h: x.h, mi: x.mi }; }
+  const m = String(v).trim().toLowerCase().match(/^(\d{1,2})(?::(\d\d))?\s*(am|pm)?$/);
+  if (!m) return null; let h = +m[1]; const mi = +(m[2] || 0);
+  if (m[3] === 'pm' && h < 12) h += 12; if (m[3] === 'am' && h === 12) h = 0;
+  return { h, mi };
+}
+const mk = (d, t) => new Date(d.y, d.m, d.d, t ? t.h : 0, t ? t.mi : 0).getTime();
+const numOrNull = v => { if (v === '' || v == null) return null; const n = parseFloat(v); return isNaN(n) ? null : n; };
+const yes = v => /^(y|yes|true|1|released)$/i.test(String(v || '').trim());
+
+$('xlsxOut').onclick = async () => {
+  const msg = $('xlsxOutMsg'); msg.style.display = 'block'; msg.textContent = 'Making spreadsheet…';
+  try {
+    await loadXLSX();
+    const trips = (await all('trips')).sort((a, b) => a.start - b.start);
+    const cs = (await all('catches')).sort((a, b) => a.time - b.time);
+    const tRows = [TRIP_COLS], cRows = [CATCH_COLS];
+    for (const t of trips) {
+      const S = t.summary || {}, mine = cs.filter(c => c.tripId === t.id);
+      const cnt = sp => t.imported ? (S.species || {})[sp] ?? '' : mine.filter(c => (c.species || '').toLowerCase() === sp.toLowerCase()).length || '';
+      const sizes = mine.map(c => numOrNull(c.size)).filter(v => v != null);
+      tRows.push([t.id, dateSerial(t.start), timeSerial(t.start), t.end ? timeSerial(t.end) : '', S.location || '',
+        S.tideStart || '', S.tideEnd || '', S.moonNote || '', S.weather || '',
+        t.imported ? S.fish ?? '' : mine.filter(c => !c.released).length || '', t.imported ? S.bait ?? '' : '',
+        t.imported ? S.avg ?? '' : sizes.length ? Math.round(sizes.reduce((a, b) => a + b) / sizes.length) : '',
+        t.imported ? S.largest ?? '' : sizes.length ? Math.max(...sizes) : '', S.technique || '', ...TRIP_SPECIES.map(cnt), t.notes || '']);
+    }
+    for (const c of cs) cRows.push([c.id, c.tripId || '', dateSerial(c.time), c.timeUnknown ? '' : timeSerial(c.time), c.species || '',
+      numOrNull(c.size) ?? '', numOrNull(c.weight) ?? '', c.method || '', c.angler || '', c.released ? 'Y' : '',
+      c.lat ?? '', c.lon ?? '', c.notes || '']);
+    const wb = XLSX.utils.book_new();
+    const fmt = (ws, rows, dateCols, timeCols) => {
+      for (let r = 1; r < rows.length; r++) {
+        dateCols.forEach(ci => { const a = XLSX.utils.encode_cell({ r, c: ci }); if (ws[a] && ws[a].t === 'n') ws[a].z = 'd/mm/yyyy'; });
+        timeCols.forEach(ci => { const a = XLSX.utils.encode_cell({ r, c: ci }); if (ws[a] && ws[a].t === 'n') ws[a].z = 'h:mm AM/PM'; });
+      }
+      ws['!cols'] = rows[0].map(h => ({ wch: Math.max(10, h.length + 2) }));
+    };
+    const ws1 = XLSX.utils.aoa_to_sheet(tRows); fmt(ws1, tRows, [1], [2, 3]);
+    const ws2 = XLSX.utils.aoa_to_sheet(cRows); fmt(ws2, cRows, [2], [3]);
+    XLSX.utils.book_append_sheet(wb, ws1, 'Trips'); XLSX.utils.book_append_sheet(wb, ws2, 'Catches');
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    download(`CatchLog_${fileStamp(Date.now())}.xlsx`, new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    msg.textContent = `Exported ${trips.length} trips and ${cs.length} catches.`;
+  } catch (e) { msg.textContent = 'Export failed: ' + e.message; }
+};
+$('xlsxIn').onclick = () => $('xlsxFile').click();
+$('xlsxFile').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  const msg = $('xlsxOutMsg'); msg.style.display = 'block'; msg.textContent = 'Reading spreadsheet…';
+  try {
+    await loadXLSX();
+    const wb = XLSX.read(await f.arrayBuffer(), { type: 'array' });
+    const rows = name => { const ws = wb.Sheets[name] || wb.Sheets[wb.SheetNames.find(n => n.toLowerCase() === name.toLowerCase())];
+      return ws ? XLSX.utils.sheet_to_json(ws, { defval: '', raw: true }) : []; };
+    const col = (r, ...names) => { for (const n of names) { const k = Object.keys(r).find(k => k.trim().toLowerCase() === n.toLowerCase()); if (k && r[k] !== '') return r[k]; } return ''; };
+    let tNew = 0, tUpd = 0, cNew = 0, cUpd = 0, skipped = 0;
+    const trips = await all('trips'), tripById = new Map(trips.map(t => [t.id, t]));
+    for (const r of rows('Trips')) {
+      const d = readDate(col(r, 'Date')); if (!d) { if (Object.values(r).some(v => v !== '')) skipped++; continue; }
+      const id = String(col(r, 'Trip ID') || '').trim();
+      const st = readTime(col(r, 'Start Time')), et = readTime(col(r, 'End Time'));
+      const start = mk(d, st); let end = et ? mk(d, et) : null; if (end != null && end < start) end += DMS;
+      const species = {}; TRIP_SPECIES.forEach(sp => { const v = numOrNull(col(r, sp, sp === 'Mackerel' ? 'Mackrel' : sp)); if (v != null) species[sp] = v; });
+      const S = { location: String(col(r, 'Location')), tideStart: String(col(r, 'Tide State (Start)')), tideEnd: String(col(r, 'Tide State (End)')),
+        moonNote: String(col(r, 'Moon Phase')), weather: String(col(r, 'Weather Notes')), technique: String(col(r, 'Notes / Technique')),
+        fish: numOrNull(col(r, '# of Fish')), bait: numOrNull(col(r, '# of Bait Fish')),
+        avg: numOrNull(col(r, 'Avg Size (cm)')), largest: numOrNull(col(r, 'Largest Size (cm)')), species };
+      const notes = String(col(r, 'Trip Notes'));
+      const ex = id && tripById.get(id);
+      if (ex) {
+        ex.notes = notes;
+        ex.start = start; if (end != null) ex.end = end;
+        // trips logged live keep their counts from the catches; only notes come from the sheet
+        ex.summary = ex.imported ? S : { ...S, fish: null, bait: null, avg: null, largest: null, species: {} };
+        await put('trips', ex); tUpd++;
+      } else {
+        const t = { id: id || uid(), start, end: end ?? start, track: [], imported: true, summary: S, notes };
+        await put('trips', t); tripById.set(t.id, t); tNew++;
+      }
+    }
+    const cs = await all('catches'), catchById = new Map(cs.map(c => [c.id, c]));
+    for (const r of rows('Catches')) {
+      const d = readDate(col(r, 'Date')); if (!d) { if (Object.values(r).some(v => v !== '')) skipped++; continue; }
+      const id = String(col(r, 'Catch ID') || '').trim(), tripId = String(col(r, 'Trip ID') || '').trim() || null;
+      const tm = readTime(col(r, 'Time')), tr = tripId && tripById.get(tripId);
+      const time = tm ? mk(d, tm) : tr && dayKey(tr.start) === dayKey(mk(d)) ? tr.start : mk(d, { h: 12, mi: 0 });
+      const lat = numOrNull(col(r, 'Latitude')), lon = numOrNull(col(r, 'Longitude'));
+      const fields = { tripId, time, timeUnknown: !tm, species: String(col(r, 'Species')), size: String(col(r, 'Length (cm)', 'Size (cm)')),
+        weight: String(col(r, 'Weight (kg)')), method: String(col(r, 'Method')), angler: String(col(r, 'Caught By')),
+        released: yes(col(r, 'Released (Y/N)', 'Released')), notes: String(col(r, 'Notes')), lat, lon,
+        moon: moonPhase(time), astro: lat != null && tm ? astro(time, lat, lon) : null };
+      const ex = id && catchById.get(id);
+      if (ex) {
+        const moved = ex.time !== time || ex.lat !== lat || ex.lon !== lon;
+        Object.assign(ex, fields); if (moved) { ex.weather = null; ex.tide = null; ex.acc = null; ex.manual = 'import'; }
+        await put('catches', ex); cUpd++;
+      } else {
+        await put('catches', { id: id || uid(), ...fields, acc: null, manual: 'import', photo: null, weather: null, tide: null }); cNew++;
+      }
+    }
+    // remember new names for the "Caught by" buttons
+    const names = (await get('settings', 'anglers')) || [];
+    for (const c of await all('catches')) if (c.angler && !names.includes(c.angler)) names.push(c.angler);
+    await put('settings', names, 'anglers');
+    msg.textContent = `Imported: ${tNew} new trips, ${tUpd} updated · ${cNew} new catches, ${cUpd} updated` + (skipped ? ` · ${skipped} rows skipped (no date)` : '');
+    renderList(); enrichAll();
+  } catch (err) { msg.textContent = 'Import failed: ' + err.message; }
+};
+
+/* ---------- trip notes ---------- */
+let notesFor = null;
+function openTripNotes(g, first) {
+  notesFor = g;
+  $('tripNotesTitle').textContent = `Notes · ${fmtDay(first)}`;
+  $('tripNotesText').value = g.trip && g.trip.notes || '';
+  $('tripNotes').classList.add('open');
+  setTimeout(() => $('tripNotesText').focus(), 50);
+}
+$('tripNotesCancel').onclick = () => { $('tripNotes').classList.remove('open'); notesFor = null; };
+$('tripNotes').onclick = e => { if (e.target.id === 'tripNotes') $('tripNotesCancel').click(); };
+$('tripNotesSave').onclick = async () => {
+  const g = notesFor, text = $('tripNotesText').value.trim();
+  $('tripNotes').classList.remove('open'); notesFor = null;
+  if (!g) return;
+  if (g.trip) {
+    const t = await get('trips', g.trip.id) || g.trip;
+    t.notes = text; await put('trips', t);
+    if (trip && trip.id === t.id) trip.notes = text;          // keep the running trip in sync
+  } else if (text) {
+    // a "No trip logged" day becomes a trip covering that day's catches
+    const d0 = new Date(Math.min(...g.catches.map(c => c.time))); d0.setHours(0, 0, 0, 0);
+    const t = { id: uid(), start: d0.getTime(), end: d0.getTime() + DMS - 1, track: [], auto: true, notes: text };
+    await put('trips', t);
+    for (const c of g.catches) { const cur = await get('catches', c.id); if (cur) { cur.tripId = t.id; await put('catches', cur); } }
+    const set = new Set((await get('settings', 'collapsed')) || []);   // keep it open/closed as it was
+    if (set.has(g.key)) { set.delete(g.key); set.add('trip:' + t.id); await put('settings', [...set], 'collapsed'); }
+  }
+  renderList();
+};
 
 /* ---------- leaderboard ---------- */
 const BOARD_SPECIES = ['Snapper', 'Kingfish', 'Trevally', 'Kahawai'];
@@ -1062,7 +1289,7 @@ $('exportAll').onclick = async () => {
   const enc = new TextEncoder();
   const cs = (await all('catches')).sort((a, b) => a.time - b.time);
   const head = ['id', 'trip_id', 'datetime_local', 'datetime_utc', 'lat', 'lon', 'gps_accuracy_m',
-    'species', 'size_cm', 'weight_kg', 'method', 'caught_by', 'moon_phase', 'moon_illum_pct', 'moon_age_days',
+    'species', 'size_cm', 'weight_kg', 'released', 'method', 'caught_by', 'moon_phase', 'moon_illum_pct', 'moon_age_days',
     'air_temp_c', 'wind_kn', 'wind_dir_deg', 'gust_kn', 'pressure_hpa', 'pressure_change_3h', 'cloud_pct', 'rain_mm',
     'tide_height_m', 'tide_stage', 'tide_since', 'tide_mins_since', 'tide_prev_time_utc', 'tide_next_time_utc',
     'sunrise', 'sunset', 'moonrise', 'moonset', 'sun_up', 'moon_up', 'nearest_sun_event', 'mins_from_sun_event',
@@ -1074,7 +1301,7 @@ $('exportAll').onclick = async () => {
   const W = ['air_temp_c', 'wind_kn', 'wind_dir_deg', 'gust_kn', 'pressure_hpa', 'pressure_change_3h', 'cloud_pct', 'rain_mm'];
   const T = ['height_m', 'stage', 'since', 'mins_since', 'prev_time', 'next_time'];
   const rows = cs.map(c => [c.id, c.tripId, new Date(c.time).toLocaleString('en-NZ'), new Date(c.time).toISOString(),
-    c.lat, c.lon, c.acc, c.species, c.size, c.weight || '', c.method, c.angler, c.moon.name, c.moon.illum, c.moon.age,
+    c.lat, c.lon, c.acc, c.species, c.size, c.weight || '', c.released ? 'yes' : '', c.method, c.angler, c.moon.name, c.moon.illum, c.moon.age,
     ...W.map(k => c.weather ? c.weather[k] : ''), ...T.map(k => c.tide ? c.tide[k] : ''),
     ...A.map(k => aVal(c.astro, k)),
     c.notes, c.photo ? photoName(c) : '']);
