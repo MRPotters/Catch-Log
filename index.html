@@ -25,7 +25,7 @@
   .start { background: var(--accent); color: #032; }
   .stop { background: var(--stop); }
   main { padding: 16px; max-width: 640px; margin: 0 auto; }
-  #caughtBtn { width: 100%; height: 150px; font-size: 34px; font-weight: 800;
+  #caughtBtn { width: 100%; height: 105px; font-size: 28px; font-weight: 800;
     border-radius: 24px; background: var(--warn); color: #2a1600; margin: 8px 0 20px;
     box-shadow: 0 6px 0 #b9771f; }
   #caughtBtn:active { box-shadow: 0 2px 0 #b9771f; transform: translateY(4px); }
@@ -48,6 +48,11 @@
   .trip-tog { padding: 4px 12px; font-size: 18px; line-height: 1; }
   .trip.shut .trip-body { display: none; }
   .trip.shut .trip-head { padding-bottom: 2px; }
+  .lb-sp { font-weight: 700; margin: 10px 4px 4px; }
+  .lb-row { display: flex; gap: 8px; font-size: 14px; padding: 6px 8px; border-radius: 10px; background: var(--panel); margin-bottom: 4px; }
+  .lb-row .r { width: 22px; flex: none; }
+  .lb-row .n { flex: 1; }
+  .lb-row .v { color: var(--muted); white-space: nowrap; }
   .empty { color: var(--muted); text-align: center; padding: 20px; }
   .small { padding: 8px 12px; font-size: 14px; }
   /* sheet */
@@ -90,6 +95,8 @@
   <button id="caughtBtn">CAUGHT!</button>
   <button id="pastBtn" class="small" style="width:100%;margin:-8px 0 8px">＋ Add past catch</button>
 
+  <section class="trip shut" id="board"></section>
+
   <h2>Catches <span class="row">
     <button class="small" id="exportAll">Export (zip)</button>
   </span></h2>
@@ -118,6 +125,9 @@
 
     <label>Size (cm)</label>
     <input type="number" id="size" inputmode="decimal" placeholder="e.g. 42">
+
+    <label>Weight (kg)</label>
+    <input type="number" id="weight" inputmode="decimal" step="0.01" placeholder="e.g. 2.4">
 
     <label>Method</label>
     <div class="grid" id="methods"></div>
@@ -559,7 +569,7 @@ $('caughtBtn').onclick = async () => {
     id: uid(), time: t, tripId: trip ? trip.id : null,
     lat: null, lon: null, acc: null,
     moon: moonPhase(t),
-    species: '', size: '', method: '', angler: '', notes: '', photo: null,
+    species: '', size: '', weight: '', method: '', angler: '', notes: '', photo: null,
     weather: null, tide: null   // to be filled in a later version
   };
   await put('catches', c);
@@ -640,7 +650,7 @@ $('pickOk').onclick = () => {
 // "Add past catch": opens a blank catch. A gallery photo fills the time; drop a pin on the map.
 // Nothing is saved until Save.
 $('pastBtn').onclick = () => openSheet({ id: uid(), draft: true, time: null, tripId: null, lat: null, lon: null,
-  acc: null, manual: true, moon: null, species: '', size: '', method: '', angler: '', notes: '', photo: null,
+  acc: null, manual: true, moon: null, species: '', size: '', weight: '', method: '', angler: '', notes: '', photo: null,
   weather: null, tide: null, astro: null });
 
 // Change time/location on an existing catch: clears weather & tide so they're re-fetched.
@@ -764,7 +774,7 @@ function renderMeta() {
 async function openSheet(c) {
   editing = { ...c };
   renderMeta();
-  $('species').value = c.species; $('size').value = c.size; $('notes').value = c.notes;
+  $('species').value = c.species; $('size').value = c.size; $('weight').value = c.weight || ''; $('notes').value = c.notes;
   $('photo').value = '';
   $('photoPrev').src = c.photo || ''; $('photoPrev').style.display = c.photo ? 'block' : 'none';
   $('exifInfo').style.display = 'none';
@@ -834,7 +844,7 @@ $('saveBtn').onclick = async () => {
     lat: latest.lat ?? editing.lat, lon: latest.lon ?? editing.lon, acc: latest.acc ?? editing.acc,
     weather: latest.weather ?? editing.weather, tide: latest.tide ?? editing.tide,
     wErr: latest.wErr, wMsg: latest.wMsg, tErr: latest.tErr, tMsg: latest.tMsg,
-    species: $('species').value.trim(), size: $('size').value, notes: $('notes').value.trim()
+    species: $('species').value.trim(), size: $('size').value, weight: $('weight').value, notes: $('notes').value.trim()
   });
   await put('catches', editing);
   closeSheet(); renderList();
@@ -857,7 +867,7 @@ function catchCard(c) {
   d.innerHTML = `${c.photo ? `<img src="${c.photo}" alt="">` : '<div class="ph">🐟</div>'}
     <div><div class="t"></div><div class="m"></div><div class="m"></div></div>
     <button class="edit">Edit</button>`;
-  d.querySelector('.t').textContent = (c.species || 'Unknown species') + (c.size ? ` · ${c.size} cm` : '');
+  d.querySelector('.t').textContent = (c.species || 'Unknown species') + (c.size ? ` · ${c.size} cm` : '') + (c.weight ? ` · ${c.weight} kg` : '');
   const ms = d.querySelectorAll('.m');
   ms[0].textContent = [c.method, c.angler].filter(Boolean).join(' · ') || '—';
   ms[1].textContent = `${hm(c.time)} · ${c.moon.name}` + (c.lat == null ? ' · no GPS' : '');
@@ -875,6 +885,7 @@ const fmtDay = t => new Date(t).toLocaleDateString('en-NZ', { weekday: 'short', 
 // Group catches into trips. A catch belongs to its logged trip, or to any logged trip whose
 // start–end covers its time; otherwise it goes into a day group for the date it was caught.
 async function renderList() {
+  renderBoard();
   const cs = (await all('catches')).sort((a, b) => b.time - a.time);
   const trips = await all('trips');
   const collapsed = new Set((await get('settings', 'collapsed')) || []);
@@ -931,6 +942,58 @@ async function renderList() {
     if (!n) body.innerHTML = '<div class="empty" style="padding:10px">No fish yet</div>';
     g.catches.forEach(c => body.appendChild(catchCard(c)));
     L.appendChild(box);
+  }
+}
+
+/* ---------- leaderboard ---------- */
+const BOARD_SPECIES = ['Snapper', 'Kingfish', 'Trevally', 'Kahawai'];
+const num = v => { const n = parseFloat(v); return isNaN(n) ? null : n; };
+// Rank by length, then weight (fish with only a weight still count).
+const fishScore = c => [num(c.size) ?? -1, num(c.weight) ?? -1];
+const better = (a, b) => { const x = fishScore(a), y = fishScore(b); return y[0] - x[0] || y[1] - x[1]; };
+const fishSize = c => [num(c.size) != null ? `${num(c.size)} cm` : '', num(c.weight) != null ? `${num(c.weight)} kg` : '']
+  .filter(Boolean).join(' · ');
+async function renderBoard() {
+  const cs = (await all('catches')).filter(c => c.species && (num(c.size) != null || num(c.weight) != null));
+  const by = new Map();
+  for (const c of cs) {
+    const k = c.species.trim().toLowerCase();
+    if (!by.has(k)) by.set(k, { name: c.species.trim().replace(/^./, m => m.toUpperCase()), fish: [] });
+    by.get(k).fish.push(c);
+  }
+  by.forEach(g => g.fish.sort(better));
+  const open = !!(await get('settings', 'boardOpen'));
+  const B = $('board'); B.classList.toggle('shut', !open);
+  // header: biggest of each headline species
+  const head = BOARD_SPECIES.map(sp => {
+    const g = by.get(sp.toLowerCase()); const f = g && g.fish[0];
+    return `${sp} ${!f ? '—' : num(f.size) != null ? num(f.size) + ' cm' : num(f.weight) + ' kg'}`;
+  }).join(' · ');
+  B.innerHTML = `<div class="trip-head">
+      <div><div class="trip-date">🏆 Biggest fish</div><div class="trip-sum"></div></div>
+      <button class="trip-tog" aria-label="Expand">${open ? '▾' : '▸'}</button>
+    </div><div class="trip-body"></div>`;
+  B.querySelector('.trip-sum').textContent = head;
+  B.querySelector('.trip-head').onclick = async () => { await put('settings', !open, 'boardOpen'); renderBoard(); };
+  const body = B.querySelector('.trip-body');
+  // headline species first, then any others alphabetically
+  const order = [...by.keys()].sort((a, b) => {
+    const ia = BOARD_SPECIES.findIndex(s => s.toLowerCase() === a), ib = BOARD_SPECIES.findIndex(s => s.toLowerCase() === b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+  });
+  if (!order.length) body.innerHTML = '<div class="empty" style="padding:10px">Add a length or weight to a catch to get on the board</div>';
+  const medals = ['🥇', '🥈', '🥉'];
+  for (const k of order) {
+    const g = by.get(k);
+    const h = document.createElement('div'); h.className = 'lb-sp'; h.textContent = g.name; body.appendChild(h);
+    g.fish.slice(0, 3).forEach((c, i) => {
+      const r = document.createElement('div'); r.className = 'lb-row';
+      r.innerHTML = `<span class="r">${medals[i]}</span><span class="n"></span><span class="v"></span>`;
+      r.querySelector('.n').textContent = `${fishSize(c)} · ${c.angler || 'Unknown'}`;
+      r.querySelector('.v').textContent = new Date(c.time).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: '2-digit' });
+      r.onclick = () => openSheet(c);
+      body.appendChild(r);
+    });
   }
 }
 
@@ -996,7 +1059,7 @@ $('exportAll').onclick = async () => {
   const enc = new TextEncoder();
   const cs = (await all('catches')).sort((a, b) => a.time - b.time);
   const head = ['id', 'trip_id', 'datetime_local', 'datetime_utc', 'lat', 'lon', 'gps_accuracy_m',
-    'species', 'size_cm', 'method', 'caught_by', 'moon_phase', 'moon_illum_pct', 'moon_age_days',
+    'species', 'size_cm', 'weight_kg', 'method', 'caught_by', 'moon_phase', 'moon_illum_pct', 'moon_age_days',
     'air_temp_c', 'wind_kn', 'wind_dir_deg', 'gust_kn', 'pressure_hpa', 'pressure_change_3h', 'cloud_pct', 'rain_mm',
     'tide_height_m', 'tide_stage', 'tide_since', 'tide_mins_since', 'tide_prev_time_utc', 'tide_next_time_utc',
     'sunrise', 'sunset', 'moonrise', 'moonset', 'sun_up', 'moon_up', 'nearest_sun_event', 'mins_from_sun_event',
@@ -1008,7 +1071,7 @@ $('exportAll').onclick = async () => {
   const W = ['air_temp_c', 'wind_kn', 'wind_dir_deg', 'gust_kn', 'pressure_hpa', 'pressure_change_3h', 'cloud_pct', 'rain_mm'];
   const T = ['height_m', 'stage', 'since', 'mins_since', 'prev_time', 'next_time'];
   const rows = cs.map(c => [c.id, c.tripId, new Date(c.time).toLocaleString('en-NZ'), new Date(c.time).toISOString(),
-    c.lat, c.lon, c.acc, c.species, c.size, c.method, c.angler, c.moon.name, c.moon.illum, c.moon.age,
+    c.lat, c.lon, c.acc, c.species, c.size, c.weight || '', c.method, c.angler, c.moon.name, c.moon.illum, c.moon.age,
     ...W.map(k => c.weather ? c.weather[k] : ''), ...T.map(k => c.tide ? c.tide[k] : ''),
     ...A.map(k => aVal(c.astro, k)),
     c.notes, c.photo ? photoName(c) : '']);
