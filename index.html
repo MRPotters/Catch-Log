@@ -65,7 +65,10 @@
 </head>
 <body>
 <header>
-  <h1>🎣 Catch Log</h1>
+  <div class="row" style="justify-content:space-between">
+    <h1>🎣 Catch Log</h1>
+    <button class="small" id="settingsBtn" aria-label="Settings">⚙️</button>
+  </div>
   <div class="row">
     <button id="tripBtn" class="trip-btn start">Start trip</button>
   </div>
@@ -111,6 +114,24 @@
       <button class="del" id="delBtn">Delete</button>
       <button class="save" id="saveBtn">Save</button>
     </div>
+  </div>
+</div>
+
+<!-- settings sheet -->
+<div class="sheet" id="settings">
+  <div class="inner">
+    <h2 style="margin-top:0">Settings</h2>
+    <label>NIWA tide API key</label>
+    <input type="text" id="niwaKey" placeholder="Paste your key" autocomplete="off" spellcheck="false">
+    <div class="meta" style="margin-top:8px">Saved on this phone only. Get a free key at developer.niwa.co.nz.</div>
+    <div class="actions">
+      <button id="testBtn">Test weather &amp; tide</button>
+    </div>
+    <div class="meta" id="testOut" style="margin-top:10px;display:none;white-space:pre-line"></div>
+    <div class="actions">
+      <button class="save" id="settingsSave">Done</button>
+    </div>
+    <div class="meta" style="margin-top:14px">Weather data by <a style="color:var(--accent)" href="https://open-meteo.com/">Open-Meteo.com</a> (CC BY 4.0). Tide data from NIWA.</div>
   </div>
 </div>
 
@@ -248,6 +269,145 @@ function renderTrip() {
 $('tripBtn').onclick = () => trip ? stopTrip() : startTrip();
 setInterval(() => trip && renderTrip(), 30000);
 
+/* ---------- weather & tide ---------- */
+const HOUR = 3600000, DAY = 86400000;
+const utcDate = t => new Date(t).toISOString().slice(0, 10);
+const MAX_TRIES = 5;   // give up on a catch after this many failed attempts (per source)
+
+async function fetchJSON(url) {
+  const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 20000);
+  try {
+    const r = await fetch(url, { signal: ctl.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally { clearTimeout(to); }
+}
+
+// Open-Meteo: hourly values nearest the catch time, plus 3-hour pressure change.
+async function fetchWeather(lat, lon, t) {
+  const old = Date.now() - t > 85 * DAY;
+  const base = old ? 'https://historical-forecast-api.open-meteo.com/v1/forecast'
+                   : 'https://api.open-meteo.com/v1/forecast';
+  const vars = 'temperature_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,pressure_msl,cloud_cover,precipitation';
+  const url = `${base}?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}&hourly=${vars}` +
+    `&wind_speed_unit=kn&timezone=GMT&start_date=${utcDate(t - DAY)}&end_date=${utcDate(t)}`;
+  const j = await fetchJSON(url);
+  const times = j.hourly.time.map(s => Date.parse(s + 'Z'));
+  let i = 0, best = Infinity;
+  times.forEach((x, k) => { const d = Math.abs(x - t); if (d < best) { best = d; i = k; } });
+  const h = j.hourly, v = k => h[k][i];
+  if (v('temperature_2m') == null) throw new Error('no data for that hour yet');
+  const p3 = i >= 3 ? h.pressure_msl[i - 3] : null;
+  return {
+    air_temp_c: v('temperature_2m'), wind_kn: v('wind_speed_10m'), wind_dir_deg: v('wind_direction_10m'),
+    gust_kn: v('wind_gusts_10m'), pressure_hpa: v('pressure_msl'),
+    pressure_change_3h: p3 != null && v('pressure_msl') != null ? +(v('pressure_msl') - p3).toFixed(1) : null,
+    cloud_pct: v('cloud_cover'), rain_mm: v('precipitation')
+  };
+}
+
+// NIWA: high/low turning points around the catch, then work out height and stage.
+async function fetchTide(lat, lon, t, key) {
+  const url = `https://api.niwa.co.nz/tides/data?lat=${lat.toFixed(4)}&long=${lon.toFixed(4)}` +
+    `&datum=MSL&startDate=${utcDate(t - DAY)}&numberOfDays=3&apikey=${encodeURIComponent(key)}`;
+  const j = await fetchJSON(url);
+  const pts = (j.values || []).map(p => ({ t: Date.parse(p.time), v: p.value })).sort((a, b) => a.t - b.t);
+  let prev = null, next = null;
+  for (const p of pts) { if (p.t <= t) prev = p; else { next = p; break; } }
+  if (!prev || !next) throw new Error('no tide times around the catch');
+  const frac = (t - prev.t) / (next.t - prev.t);
+  const height = (prev.v + next.v) / 2 + (prev.v - next.v) / 2 * Math.cos(Math.PI * frac);
+  const rising = next.v > prev.v;
+  return {
+    height_m: +height.toFixed(2), stage: rising ? 'rising' : 'falling',
+    since: rising ? 'low' : 'high', mins_since: Math.round((t - prev.t) / 60000),
+    prev_time: new Date(prev.t).toISOString(), prev_m: prev.v,
+    next_time: new Date(next.t).toISOString(), next_m: next.v
+  };
+}
+
+const fmtSince = m => `${Math.floor(m / 60)}h ${pad(m % 60)}m`;
+const compass = d => d == null ? '' : ['N','NE','E','SE','S','SW','W','NW'][Math.round(d / 45) % 8];
+function weatherText(w) {
+  if (!w) return null;
+  const pt = w.pressure_change_3h == null ? '' : w.pressure_change_3h > 0.5 ? ' ↑' : w.pressure_change_3h < -0.5 ? ' ↓' : ' →';
+  return `${compass(w.wind_dir_deg)} ${Math.round(w.wind_kn)} kn (gust ${Math.round(w.gust_kn)}) · ${Math.round(w.air_temp_c)}°C · ${Math.round(w.pressure_hpa)} hPa${pt}`;
+}
+const tideText = d => d ? `${d.stage === 'rising' ? '↗ Rising' : '↘ Falling'} · ${fmtSince(d.mins_since)} after ${d.since} · ${d.height_m} m` : null;
+
+let enriching = false;
+async function enrichAll() {
+  if (enriching || !navigator.onLine || !db) return;
+  enriching = true;
+  try {
+    const key = (await get('settings', 'niwaKey')) || '';
+    const cs = await all('catches');
+    let changed = false;
+    for (const c of cs) {
+      if (c.lat == null) continue;
+      let dirty = false;
+      if (!c.weather && (c.wErr || 0) < MAX_TRIES) {
+        try { c.weather = await fetchWeather(c.lat, c.lon, c.time); delete c.wErr; delete c.wMsg; }
+        catch (e) { c.wErr = (c.wErr || 0) + 1; c.wMsg = e.message; }
+        dirty = true;
+      }
+      if (!c.tide && key && (c.tErr || 0) < MAX_TRIES) {
+        try { c.tide = await fetchTide(c.lat, c.lon, c.time, key); delete c.tErr; delete c.tMsg; }
+        catch (e) { c.tErr = (c.tErr || 0) + 1; c.tMsg = e.message; }
+        dirty = true;
+      }
+      if (dirty) {
+        // merge into the latest copy so we don't overwrite edits made meanwhile
+        const cur = await get('catches', c.id); if (!cur) continue;
+        for (const k of ['weather', 'tide', 'wErr', 'wMsg', 'tErr', 'tMsg']) {
+          if (c[k] === undefined) delete cur[k]; else cur[k] = c[k];
+        }
+        await put('catches', cur); changed = true;
+        if (editing && editing.id === c.id) {
+          for (const k of ['weather', 'tide']) editing[k] = cur[k];
+          renderMeta();
+        }
+      }
+    }
+    if (changed) renderList();
+  } finally { enriching = false; }
+}
+window.addEventListener('online', () => enrichAll());
+setInterval(enrichAll, 5 * 60 * 1000);
+
+// settings
+$('settingsBtn').onclick = async () => {
+  $('niwaKey').value = (await get('settings', 'niwaKey')) || '';
+  $('testOut').style.display = 'none';
+  $('settings').classList.add('open');
+};
+async function saveKey() {
+  const k = $('niwaKey').value.trim();
+  const old = (await get('settings', 'niwaKey')) || '';
+  await put('settings', k, 'niwaKey');
+  if (k && k !== old) {  // new key: let catches that failed on tide try again
+    for (const c of await all('catches')) if (!c.tide && c.tErr) { delete c.tErr; delete c.tMsg; await put('catches', c); }
+  }
+}
+$('settingsSave').onclick = async () => { await saveKey(); $('settings').classList.remove('open'); enrichAll(); };
+$('settings').onclick = e => { if (e.target.id === 'settings') $('settingsSave').click(); };
+$('testBtn').onclick = async () => {
+  const out = $('testOut'); out.style.display = 'block'; out.textContent = 'Testing…';
+  await saveKey();
+  const fix = await getFix();
+  const lat = fix ? fix.lat : -36.84, lon = fix ? fix.lon : 174.76;
+  const lines = [fix ? `Using your location ${lat.toFixed(3)}, ${lon.toFixed(3)}` : 'No GPS, testing at Auckland'];
+  try { lines.push('Weather ✅ ' + weatherText(await fetchWeather(lat, lon, Date.now()))); }
+  catch (e) { lines.push('Weather ❌ ' + e.message); }
+  const key = (await get('settings', 'niwaKey')) || '';
+  if (!key) lines.push('Tide ⚠️ no key entered');
+  else {
+    try { lines.push('Tide ✅ ' + tideText(await fetchTide(lat, lon, Date.now(), key))); }
+    catch (e) { lines.push('Tide ❌ ' + e.message); }
+  }
+  out.textContent = lines.join('\n');
+};
+
 /* ---------- catches ---------- */
 let editing = null;
 
@@ -266,13 +426,17 @@ $('caughtBtn').onclick = async () => {
   const fix = await getFix();
   if (fix) { Object.assign(c, fix); if (editing && editing.id === c.id) Object.assign(editing, fix); await put('catches', c); }
   renderMeta(); renderList();
+  enrichAll();   // fetch weather & tide now if there's signal, otherwise later
 };
 
 function renderMeta() {
   if (!editing) return;
   const c = editing;
   const loc = c.lat != null ? `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)} (±${c.acc} m)` : 'Getting location…';
-  $('sheetMeta').innerHTML = `<b>${fmtTime(c.time)}</b><br>📍 ${loc}<br>🌙 ${c.moon.name} · ${c.moon.illum}% lit`;
+  const w = weatherText(c.weather) || (navigator.onLine ? 'Weather: fetching…' : 'Weather: will fill in when back in signal');
+  const td = tideText(c.tide) || 'Tide: ' + (c.tMsg ? 'not available yet' : navigator.onLine ? 'fetching…' : 'will fill in when back in signal');
+  $('sheetMeta').innerHTML = `<b>${fmtTime(c.time)}</b><br>📍 ${loc}<br>🌙 ${c.moon.name} · ${c.moon.illum}% lit` +
+    `<br>🌬️ ${w}<br>🌊 ${td}`;
 }
 
 async function openSheet(c) {
@@ -331,6 +495,8 @@ $('saveBtn').onclick = async () => {
   const latest = await get('catches', editing.id) || {};
   Object.assign(editing, {
     lat: latest.lat ?? editing.lat, lon: latest.lon ?? editing.lon, acc: latest.acc ?? editing.acc,
+    weather: latest.weather ?? editing.weather, tide: latest.tide ?? editing.tide,
+    wErr: latest.wErr, wMsg: latest.wMsg, tErr: latest.tErr, tMsg: latest.tMsg,
     species: $('species').value.trim(), size: $('size').value, notes: $('notes').value.trim()
   });
   await put('catches', editing);
@@ -356,6 +522,10 @@ async function renderList() {
     const ms = d.querySelectorAll('.m');
     ms[0].textContent = [c.method, c.angler].filter(Boolean).join(' · ') || '—';
     ms[1].textContent = `${fmtTime(c.time)} · ${c.moon.name}` + (c.lat == null ? ' · no GPS' : '');
+    const wt = [weatherText(c.weather), tideText(c.tide)].filter(Boolean).join('\n');
+    const m3 = document.createElement('div'); m3.className = 'm'; m3.style.whiteSpace = 'pre-line';
+    m3.textContent = wt || (c.lat == null ? '' : '⏳ weather & tide pending');
+    ms[1].after(m3);
     d.onclick = () => openSheet(c);   // tap anywhere on the card to edit
     L.appendChild(d);
   });
@@ -424,11 +594,15 @@ $('exportAll').onclick = async () => {
   const cs = (await all('catches')).sort((a, b) => a.time - b.time);
   const head = ['id', 'trip_id', 'datetime_local', 'datetime_utc', 'lat', 'lon', 'gps_accuracy_m',
     'species', 'size_cm', 'method', 'caught_by', 'moon_phase', 'moon_illum_pct', 'moon_age_days',
-    'weather', 'tide', 'notes', 'photo_file'];
+    'air_temp_c', 'wind_kn', 'wind_dir_deg', 'gust_kn', 'pressure_hpa', 'pressure_change_3h', 'cloud_pct', 'rain_mm',
+    'tide_height_m', 'tide_stage', 'tide_since', 'tide_mins_since', 'tide_prev_time_utc', 'tide_next_time_utc',
+    'notes', 'photo_file'];
+  const W = ['air_temp_c', 'wind_kn', 'wind_dir_deg', 'gust_kn', 'pressure_hpa', 'pressure_change_3h', 'cloud_pct', 'rain_mm'];
+  const T = ['height_m', 'stage', 'since', 'mins_since', 'prev_time', 'next_time'];
   const rows = cs.map(c => [c.id, c.tripId, new Date(c.time).toLocaleString('en-NZ'), new Date(c.time).toISOString(),
     c.lat, c.lon, c.acc, c.species, c.size, c.method, c.angler, c.moon.name, c.moon.illum, c.moon.age,
-    c.weather ? JSON.stringify(c.weather) : '', c.tide ? JSON.stringify(c.tide) : '', c.notes,
-    c.photo ? photoName(c) : '']);
+    ...W.map(k => c.weather ? c.weather[k] : ''), ...T.map(k => c.tide ? c.tide[k] : ''),
+    c.notes, c.photo ? photoName(c) : '']);
   const ts = await all('trips');
   const trows = [['trip_id', 'trip_start_utc', 'point_time_utc', 'lat', 'lon']];
   ts.forEach(t => t.track.forEach(p => trows.push([t.id, new Date(t.start).toISOString(), new Date(p.t).toISOString(), p.lat, p.lon])));
@@ -446,7 +620,7 @@ $('exportAll').onclick = async () => {
   db = await openDB();
   const active = await get('settings', 'activeTrip');
   if (active) { trip = await get('trips', active); if (trip) beginWatch(); }
-  renderTrip(); renderList();
+  renderTrip(); renderList(); enrichAll();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
 })();
 </script>
