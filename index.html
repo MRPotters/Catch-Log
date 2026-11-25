@@ -48,6 +48,7 @@
   .trip-tog { padding: 4px 12px; font-size: 18px; line-height: 1; }
   .trip.shut .trip-body { display: none; }
   .trip.shut .trip-head { padding-bottom: 2px; }
+  .trip-head .lb-mode { padding: 5px 10px; font-size: 13px; line-height: 1.2; }
   .lb-sp { font-weight: 700; margin: 10px 4px 4px; }
   .lb-row { display: flex; gap: 8px; font-size: 14px; padding: 6px 8px; border-radius: 10px; background: var(--panel); margin-bottom: 4px; }
   .lb-row .r { width: 22px; flex: none; }
@@ -948,40 +949,42 @@ async function renderList() {
 /* ---------- leaderboard ---------- */
 const BOARD_SPECIES = ['Snapper', 'Kingfish', 'Trevally', 'Kahawai'];
 const num = v => { const n = parseFloat(v); return isNaN(n) ? null : n; };
-// Rank by length, then weight (fish with only a weight still count).
-const fishScore = c => [num(c.size) ?? -1, num(c.weight) ?? -1];
-const better = (a, b) => { const x = fishScore(a), y = fishScore(b); return y[0] - x[0] || y[1] - x[1]; };
-const fishSize = c => [num(c.size) != null ? `${num(c.size)} cm` : '', num(c.weight) != null ? `${num(c.weight)} kg` : '']
-  .filter(Boolean).join(' · ');
+// Two boards: by length (cm) or by weight (kg). A fish only appears on a board it has a value for.
 async function renderBoard() {
-  const cs = (await all('catches')).filter(c => c.species && (num(c.size) != null || num(c.weight) != null));
+  const mode = (await get('settings', 'boardMode')) === 'kg' ? 'kg' : 'cm';
+  const field = mode === 'cm' ? 'size' : 'weight';
+  const val = c => num(c[field]);
+  const fmt = c => mode === 'cm' ? `${val(c)} cm` : `${val(c)} kg`;
+  const cs = (await all('catches')).filter(c => c.species && val(c) != null);
   const by = new Map();
   for (const c of cs) {
     const k = c.species.trim().toLowerCase();
     if (!by.has(k)) by.set(k, { name: c.species.trim().replace(/^./, m => m.toUpperCase()), fish: [] });
     by.get(k).fish.push(c);
   }
-  by.forEach(g => g.fish.sort(better));
+  by.forEach(g => g.fish.sort((a, b) => val(b) - val(a) || a.time - b.time));  // ties: first caught wins
   const open = !!(await get('settings', 'boardOpen'));
   const B = $('board'); B.classList.toggle('shut', !open);
-  // header: biggest of each headline species
-  const head = BOARD_SPECIES.map(sp => {
-    const g = by.get(sp.toLowerCase()); const f = g && g.fish[0];
-    return `${sp} ${!f ? '—' : num(f.size) != null ? num(f.size) + ' cm' : num(f.weight) + ' kg'}`;
-  }).join(' · ');
+  const head = BOARD_SPECIES.map(sp => { const g = by.get(sp.toLowerCase()); return `${sp} ${g ? fmt(g.fish[0]) : '—'}`; }).join(' · ');
   B.innerHTML = `<div class="trip-head">
-      <div><div class="trip-date">🏆 Biggest fish</div><div class="trip-sum"></div></div>
-      <button class="trip-tog" aria-label="Expand">${open ? '▾' : '▸'}</button>
+      <div><div class="trip-date">🏆 Leader Board</div><div class="trip-sum"></div></div>
+      <div class="row" style="flex:none;gap:6px">
+        <button class="small chip lb-mode ${mode === 'cm' ? 'on' : ''}" data-m="cm">cm</button>
+        <button class="small chip lb-mode ${mode === 'kg' ? 'on' : ''}" data-m="kg">kg</button>
+        <button class="trip-tog" aria-label="Expand">${open ? '▾' : '▸'}</button>
+      </div>
     </div><div class="trip-body"></div>`;
   B.querySelector('.trip-sum').textContent = head;
   B.querySelector('.trip-head').onclick = async () => { await put('settings', !open, 'boardOpen'); renderBoard(); };
+  B.querySelectorAll('.lb-mode').forEach(btn => btn.onclick = async e => {
+    e.stopPropagation(); await put('settings', btn.dataset.m, 'boardMode'); renderBoard();
+  });
   const body = B.querySelector('.trip-body');
-  // headline species first, then any others alphabetically
   const order = [...by.keys()].sort((a, b) => {
     const ia = BOARD_SPECIES.findIndex(s => s.toLowerCase() === a), ib = BOARD_SPECIES.findIndex(s => s.toLowerCase() === b);
     return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
   });
-  if (!order.length) body.innerHTML = '<div class="empty" style="padding:10px">Add a length or weight to a catch to get on the board</div>';
+  if (!order.length) body.innerHTML = `<div class="empty" style="padding:10px">Add a ${mode === 'cm' ? 'length' : 'weight'} to a catch to get on this board</div>`;
   const medals = ['🥇', '🥈', '🥉'];
   for (const k of order) {
     const g = by.get(k);
@@ -989,7 +992,7 @@ async function renderBoard() {
     g.fish.slice(0, 3).forEach((c, i) => {
       const r = document.createElement('div'); r.className = 'lb-row';
       r.innerHTML = `<span class="r">${medals[i]}</span><span class="n"></span><span class="v"></span>`;
-      r.querySelector('.n').textContent = `${fishSize(c)} · ${c.angler || 'Unknown'}`;
+      r.querySelector('.n').textContent = `${fmt(c)} · ${c.angler || 'Unknown'}`;
       r.querySelector('.v').textContent = new Date(c.time).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: '2-digit' });
       r.onclick = () => openSheet(c);
       body.appendChild(r);
