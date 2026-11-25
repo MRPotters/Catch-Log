@@ -95,7 +95,12 @@
     <button class="small" id="changeWhereBtn" style="margin-top:8px">📍 Change time / location</button>
 
     <label>Photo</label>
-    <input type="file" accept="image/*" capture="environment" id="photo">
+    <div class="row">
+      <button style="flex:1" id="camBtn">📷 Take photo</button>
+      <button style="flex:1" id="galBtn">🖼️ From gallery</button>
+    </div>
+    <input type="file" accept="image/*" capture="environment" id="photo" hidden>
+    <input type="file" accept="image/*" id="photoGal" hidden>
     <img class="photo-prev" id="photoPrev" alt="">
 
     <label>Species</label>
@@ -697,14 +702,20 @@ async function renderSpeciesList() {
   const set = [...new Set(cs.map(c => c.species).filter(Boolean))];
   $('speciesList').innerHTML = set.map(s => `<option value="${s.replace(/"/g, '&quot;')}">`).join('');
 }
-$('photo').onchange = async e => {
-  const f = e.target.files[0]; if (!f) return;
-  // Save a full-size copy to the phone (Downloads folder) straight away.
-  const ext = (f.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
-  download(`CatchLog_${fileStamp(editing.time)}_${editing.id}.${ext}`, f);
+$('camBtn').onclick = () => $('photo').click();
+$('galBtn').onclick = () => $('photoGal').click();
+async function usePhoto(f, fromCamera) {
+  if (!f) return;
+  // Camera shots: save a full-size copy to the phone (Downloads). Gallery photos are already there.
+  if (fromCamera) {
+    const ext = (f.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
+    download(`CatchLog_${fileStamp(editing.time)}_${editing.id}.${ext}`, f);
+  }
   editing.photo = await resizePhoto(f);
   $('photoPrev').src = editing.photo; $('photoPrev').style.display = 'block';
-};
+}
+$('photo').onchange = e => { usePhoto(e.target.files[0], true); e.target.value = ''; };
+$('photoGal').onchange = e => { usePhoto(e.target.files[0], false); e.target.value = ''; };
 $('saveBtn').onclick = async () => {
   const latest = await get('catches', editing.id) || {};
   Object.assign(editing, {
