@@ -45,6 +45,11 @@
   .trip-head > div { flex: 1; }
   .trip-date { font-weight: 700; }
   .trip-sub, .trip-sum { font-size: 13px; color: var(--muted); }
+  .te-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .te-grid label { margin: 6px 0 4px; font-size: 12px; }
+  .te-grid input { padding: 10px; }
+  .te-row { display: flex; gap: 8px; } .te-row > div { flex: 1; min-width: 0; }
+  .trip-env { cursor: pointer; }
   .trip-tog { padding: 4px 12px; font-size: 18px; line-height: 1; }
   .trip-note { font-size: 14px; padding: 5px 8px; opacity: .5; }
   .trip-note.on { opacity: 1; background: var(--accent); }
@@ -76,7 +81,7 @@
   .actions button { flex: 1; padding: 14px; font-weight: 700; }
   .save { background: var(--accent); color: #032; }
   .del { background: transparent; color: var(--stop); border: 1px solid var(--stop); }
-  input[type=datetime-local] { width: 100%; font: inherit; padding: 12px; border-radius: 10px;
+  input[type=datetime-local], input[type=date], input[type=time] { width: 100%; font: inherit; padding: 12px; border-radius: 10px;
     border: 1px solid var(--line); background: var(--panel); color: var(--text); color-scheme: dark; }
   #map { height: 48vh; min-height: 260px; border-radius: 12px; background: var(--panel); }
   .meta { font-size: 13px; color: var(--muted); background: var(--panel); padding: 10px; border-radius: 10px; }
@@ -157,7 +162,7 @@
 <div class="sheet" id="picker" style="z-index:20">
   <div class="inner">
     <h2 style="margin-top:0">When &amp; where</h2>
-    <label>Date &amp; time</label>
+    <label id="pickTimeLbl">Date &amp; time</label>
     <input type="datetime-local" id="pickTime">
     <label>Location: tap the map to place the pin (or drag it)</label>
     <div id="map"></div>
@@ -169,15 +174,50 @@
   </div>
 </div>
 
-<!-- trip notes -->
-<div class="sheet" id="tripNotes" style="z-index:15">
+<!-- trip details -->
+<div class="sheet" id="tripEdit" style="z-index:15">
   <div class="inner">
-    <h2 style="margin-top:0" id="tripNotesTitle">Trip notes</h2>
-    <textarea id="tripNotesText" rows="6" placeholder="How did the trip go? Spots, bait, conditions, what worked…"></textarea>
-    <div class="actions">
-      <button class="del" id="tripNotesCancel">Cancel</button>
-      <button class="save" id="tripNotesSave">Save</button>
+    <h2 style="margin-top:0" id="teTitle">Trip details</h2>
+    <label>Notes</label>
+    <textarea id="teNotes" rows="4" placeholder="How did the trip go? Spots, bait, conditions, what worked…"></textarea>
+
+    <label>Location</label>
+    <input type="text" id="teLoc" placeholder="e.g. Kawakawa Bay mussel farm">
+    <div class="row" style="margin-top:8px">
+      <button class="small" id="tePin">📍 Drop pin on map</button>
+      <span class="meta" id="tePinInfo" style="flex:1;padding:8px"></span>
     </div>
+
+    <div id="teTimes">
+      <label>Date</label>
+      <input type="date" id="teDate">
+      <div class="te-row">
+        <div><label>Start</label><input type="time" id="teStart"></div>
+        <div><label>End</label><input type="time" id="teEnd"></div>
+      </div>
+    </div>
+
+    <label>Technique</label>
+    <input type="text" id="teTech" placeholder="e.g. Strayline, ledger / lure">
+    <div class="te-row">
+      <div><label>Tide at start</label><input type="text" id="teTideS" placeholder="e.g. Out"></div>
+      <div><label>Tide at end</label><input type="text" id="teTideE" placeholder="e.g. In"></div>
+    </div>
+    <label>Moon</label>
+    <input type="text" id="teMoon" placeholder="e.g. New moon">
+    <label>Weather notes</label>
+    <input type="text" id="teWx" placeholder="e.g. Windy first half">
+
+    <div id="teCounts">
+      <label style="margin-top:18px">Fish counts (imported trip)</label>
+      <div class="te-grid" id="teCountGrid"></div>
+    </div>
+
+    <div class="actions">
+      <button id="teCancel">Cancel</button>
+      <button class="save" id="teSave">Save</button>
+    </div>
+    <button class="del small" id="teDel" style="width:100%;margin-top:14px">Delete trip (keeps its catches)</button>
   </div>
 </div>
 
@@ -520,8 +560,27 @@ async function enrichAll() {
   enriching = true; rerun = false;
   try {
     const key = (await get('settings', 'niwaKey')) || '';
-    const cs = await all('catches');
     let changed = false;
+    for (const t of await all('trips')) {
+      if (t.lat == null || !t.end || (trip && trip.id === t.id)) continue;
+      const mid = (t.start + t.end) / 2, upd = {};
+      if (!t.astro) upd.astro = astro(mid, t.lat, t.lon);
+      if (!t.weather && (t.wErr || 0) < MAX_TRIES) {
+        try { upd.weather = await fetchWeather(t.lat, t.lon, mid); upd.wErr = undefined; upd.wMsg = undefined; }
+        catch (e) { upd.wErr = (t.wErr || 0) + 1; upd.wMsg = e.message; }
+      }
+      if (!t.tideS && key && (t.tErr || 0) < MAX_TRIES) {
+        try { upd.tideS = await fetchTide(t.lat, t.lon, t.start, key); upd.tideE = await fetchTide(t.lat, t.lon, t.end, key);
+              upd.tErr = undefined; upd.tMsg = undefined; }
+        catch (e) { upd.tErr = (t.tErr || 0) + 1; upd.tMsg = e.message; }
+      }
+      if (!Object.keys(upd).length) continue;
+      const cur = await get('trips', t.id); if (!cur) continue;
+      if (cur.start !== t.start || cur.end !== t.end || cur.lat !== t.lat || cur.lon !== t.lon) { rerun = true; continue; }
+      for (const [k, v] of Object.entries(upd)) { if (v === undefined) delete cur[k]; else cur[k] = v; }
+      await put('trips', cur); changed = true;
+    }
+    const cs = await all('catches');
     for (const c of cs) {
       if (c.lat == null || c.timeUnknown) continue;
       let dirty = false;
@@ -636,8 +695,10 @@ function setPin(lat, lon) {
   } }
   $('pickInfo').textContent = `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}`;
 }
+let pickNoTime = false;
 async function openPicker(start, cb) {
-  pickCb = cb; pickLL = null;
+  pickCb = cb; pickLL = null; pickNoTime = !!start.noTime;
+  $('pickTime').style.display = $('pickTimeLbl').style.display = pickNoTime ? 'none' : '';
   $('pickTime').value = toLocalInput(start.time);
   $('pickTime').max = toLocalInput(Date.now());
   $('pickInfo').textContent = 'Loading map…';
@@ -658,7 +719,7 @@ async function openPicker(start, cb) {
     map.setView([lat, lon], zoom);
     setTimeout(() => map.invalidateSize(), 50);
     if (start.lat != null) setPin(start.lat, start.lon);
-    else { if (pin) { pin.remove(); pin = null; } $('pickInfo').textContent = 'Tap the map where you caught it'; }
+    else { if (pin) { pin.remove(); pin = null; } $('pickInfo').textContent = pickNoTime ? 'Tap the map where you fished' : 'Tap the map where you caught it'; }
   } catch (e) {
     $('pickInfo').textContent = 'Map needs signal to load. ' + (start.lat != null ? 'Keeping the existing location.' : '');
     if (start.lat != null) pickLL = { lat: start.lat, lon: start.lon };
@@ -667,6 +728,10 @@ async function openPicker(start, cb) {
 function closePicker() { $('picker').classList.remove('open'); pickCb = null; }
 $('pickCancel').onclick = closePicker;
 $('pickOk').onclick = () => {
+  if (pickNoTime) {
+    if (!pickLL) return alert('Tap the map to set where you fished');
+    const cb = pickCb; closePicker(); cb && cb({ ...pickLL }); return;
+  }
   const t = new Date($('pickTime').value).getTime();
   if (!t) return alert('Pick a date and time');
   if (t > Date.now() + 60000) return alert("That time is in the future");
@@ -797,7 +862,7 @@ function renderMeta() {
     return;
   }
   const loc = c.lat == null ? 'Getting location…'
-    : `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}` + (c.acc != null ? ` (±${c.acc} m)` : c.manual === 'photo' ? ' (from photo)' : ' (set on map)');
+    : `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}` + (c.acc != null ? ` (±${c.acc} m)` : c.manual === 'photo' ? ' (from photo)' : c.manual === 'trip' ? ' (trip location)' : ' (set on map)');
   const w = weatherText(c.weather) || 'Weather: ' + (c.wMsg ? 'not available yet' : navigator.onLine ? 'fetching…' : 'will fill in when back in signal');
   const td = tideText(c.tide) || 'Tide: ' + (c.tMsg ? 'not available yet' : navigator.onLine ? 'fetching…' : 'will fill in when back in signal');
   $('sheetMeta').innerHTML = `<b>${fmtTime(c.time)}</b><br>📍 ${loc}<br>🌙 ${c.moon.name} · ${c.moon.illum}% lit` +
@@ -964,16 +1029,17 @@ async function renderList() {
       summary += `${summary ? ' · ' : ''}${S.bait} bait${bk.length ? ` (${bk.join(', ')})` : ''}`;
     }
     if (!S && rel) summary += ` · ${rel} released`;
+    const pinned = !!(g.trip && g.trip.lat != null);
     const loc = g.trip && g.trip.summary && g.trip.summary.location ? ' · ' + g.trip.summary.location : '';
-    const when = g.trip && g.trip.auto ? 'No trip logged'
+    const when = g.trip && g.trip.auto ? 'No trip logged' + loc + (g.trip.lat != null ? ' 📍' : '')
       : g.trip
-      ? (g.trip.end ? `${hm(g.trip.start)} – ${hm(g.trip.end)}` : `Started ${hm(g.trip.start)} · in progress`) + loc
+      ? (g.trip.end ? `${hm(g.trip.start)} – ${hm(g.trip.end)}` : `Started ${hm(g.trip.start)} · in progress`) + loc + (pinned ? ' 📍' : '')
       : 'No trip logged';
     const noteText = g.trip && g.trip.notes ? g.trip.notes : '';
     box.innerHTML = `<div class="trip-head">
         <div><div class="trip-date"></div><div class="trip-sub"></div><div class="trip-sum"></div></div>
         <div class="row" style="flex:none;gap:6px">
-          <button class="trip-tog trip-note ${noteText ? 'on' : ''}" aria-label="Trip notes">💬</button>
+          <button class="trip-tog trip-note ${noteText ? 'on' : ''}" aria-label="Trip details and notes">💬</button>
           <button class="trip-tog" aria-label="Minimise">${shut ? '▸' : '▾'}</button>
         </div>
       </div><div class="trip-body"></div>`;
@@ -986,18 +1052,30 @@ async function renderList() {
       await put('settings', [...set], 'collapsed');
       renderList();
     };
-    box.querySelector('.trip-note').onclick = e => { e.stopPropagation(); openTripNotes(g, first); };
+    box.querySelector('.trip-note').onclick = e => { e.stopPropagation(); openTripEdit(g, first); };
     const body = box.querySelector('.trip-body');
     if (noteText) { const m = document.createElement('div'); m.className = 'meta'; m.style.cssText = 'margin-bottom:8px;white-space:pre-line;color:var(--text)';
-      m.textContent = '💬 ' + noteText; m.onclick = () => openTripNotes(g, first); body.appendChild(m); }
+      m.textContent = '💬 ' + noteText; m.onclick = () => openTripEdit(g, first); body.appendChild(m); }
     const T = g.trip && g.trip.summary;
     if (T) {
       const bits = [T.technique, T.avg != null || T.largest != null ? [T.avg != null ? `avg ${T.avg} cm` : '', T.largest != null ? `largest ${T.largest} cm` : ''].filter(Boolean).join(', ') : '',
         T.tideStart || T.tideEnd ? `Tide ${T.tideStart || '?'} → ${T.tideEnd || '?'}` : '', T.moonNote, T.weather].filter(Boolean);
-      if (bits.length) { const m = document.createElement('div'); m.className = 'meta'; m.style.marginBottom = '8px';
-        m.textContent = bits.join(' · '); body.appendChild(m); }
+      if (bits.length) { const m = document.createElement('div'); m.className = 'meta trip-env'; m.style.marginBottom = '8px';
+        m.textContent = bits.join(' · '); m.onclick = () => openTripEdit(g, first); body.appendChild(m); }
     }
-    if (!g.catches.length && !T) body.insertAdjacentHTML('beforeend', '<div class="empty" style="padding:10px">No fish yet</div>');
+    if (pinned && g.trip.end) {
+      const tr = g.trip, short = d => d ? `${d.stage === 'rising' ? '↗' : '↘'} ${fmtSince(d.mins_since)} after ${d.since}` : '?';
+      const env = [
+        weatherText(tr.weather) ? '🌬️ ' + weatherText(tr.weather) : '',
+        tr.tideS || tr.tideE ? `🌊 ${short(tr.tideS)} → ${short(tr.tideE)}` : '',
+        tr.astro ? `☀️ ${hm(tr.astro.sunrise)}–${hm(tr.astro.sunset)} · 🌙 ${moonPhase((tr.start + tr.end) / 2).name}` : ''
+      ].filter(Boolean);
+      const m = document.createElement('div'); m.className = 'meta trip-env'; m.style.cssText = 'margin-bottom:8px;white-space:pre-line';
+      m.textContent = env.length ? env.join('\n') + (tr.weather ? '' : tr.wMsg ? '\n🌬️ weather not available for this date' : '\n⏳ weather pending')
+        : '⏳ weather & tide pending';
+      m.onclick = () => openTripEdit(g, first); body.appendChild(m);
+    }
+    if (!g.catches.length && !(g.trip && g.trip.imported)) body.insertAdjacentHTML('beforeend', '<div class="empty" style="padding:10px">No fish yet</div>');
     g.catches.forEach(c => body.appendChild(catchCard(c)));
     L.appendChild(box);
   }
@@ -1007,7 +1085,7 @@ async function renderList() {
 const BAIT = ['koheru', 'mackerel', 'mackrel', 'jack mackerel', 'pilchard', 'yellowtail'];
 const TRIP_SPECIES = ['Snapper', 'Trevally', 'Kahawai', 'Koheru', 'Kingfish', 'Mackerel'];
 const TRIP_COLS = ['Trip ID', 'Date', 'Start Time', 'End Time', 'Location', 'Tide State (Start)', 'Tide State (End)',
-  'Moon Phase', 'Weather Notes', '# of Fish', '# of Bait Fish', 'Avg Size (cm)', 'Largest Size (cm)', 'Notes / Technique', ...TRIP_SPECIES, 'Trip Notes'];
+  'Moon Phase', 'Weather Notes', '# of Fish', '# of Bait Fish', 'Avg Size (cm)', 'Largest Size (cm)', 'Notes / Technique', ...TRIP_SPECIES, 'Trip Notes', 'Latitude', 'Longitude'];
 const CATCH_COLS = ['Catch ID', 'Trip ID', 'Date', 'Time', 'Species', 'Length (cm)', 'Weight (kg)', 'Method', 'Caught By',
   'Released (Y/N)', 'Latitude', 'Longitude', 'Notes'];
 function loadXLSX() {
@@ -1057,7 +1135,7 @@ $('xlsxOut').onclick = async () => {
         S.tideStart || '', S.tideEnd || '', S.moonNote || '', S.weather || '',
         t.imported ? S.fish ?? '' : mine.filter(c => !c.released).length || '', t.imported ? S.bait ?? '' : '',
         t.imported ? S.avg ?? '' : sizes.length ? Math.round(sizes.reduce((a, b) => a + b) / sizes.length) : '',
-        t.imported ? S.largest ?? '' : sizes.length ? Math.max(...sizes) : '', S.technique || '', ...TRIP_SPECIES.map(cnt), t.notes || '']);
+        t.imported ? S.largest ?? '' : sizes.length ? Math.max(...sizes) : '', S.technique || '', ...TRIP_SPECIES.map(cnt), t.notes || '', t.lat ?? '', t.lon ?? '']);
     }
     for (const c of cs) cRows.push([c.id, c.tripId || '', dateSerial(c.time), c.timeUnknown ? '' : timeSerial(c.time), c.species || '',
       numOrNull(c.size) ?? '', numOrNull(c.weight) ?? '', c.method || '', c.angler || '', c.released ? 'Y' : '',
@@ -1101,15 +1179,20 @@ $('xlsxFile').onchange = async e => {
         fish: numOrNull(col(r, '# of Fish')), bait: numOrNull(col(r, '# of Bait Fish')),
         avg: numOrNull(col(r, 'Avg Size (cm)')), largest: numOrNull(col(r, 'Largest Size (cm)')), species };
       const notes = String(col(r, 'Trip Notes'));
+      const tLat = numOrNull(col(r, 'Latitude')), tLon = numOrNull(col(r, 'Longitude'));
       const ex = id && tripById.get(id);
       if (ex) {
         ex.notes = notes;
+        if (tLat != null && tLon != null && (tLat !== ex.lat || tLon !== ex.lon)) {
+          ex.lat = tLat; ex.lon = tLon; for (const k of ['weather', 'tideS', 'tideE', 'astro', 'wErr', 'tErr']) delete ex[k];
+        }
         ex.start = start; if (end != null) ex.end = end;
         // trips logged live keep their counts from the catches; only notes come from the sheet
         ex.summary = ex.imported ? S : { ...S, fish: null, bait: null, avg: null, largest: null, species: {} };
         await put('trips', ex); tUpd++;
       } else {
-        const t = { id: id || uid(), start, end: end ?? start, track: [], imported: true, summary: S, notes };
+        const t = { id: id || uid(), start, end: end ?? start, track: [], imported: true, summary: S, notes,
+          ...(tLat != null && tLon != null ? { lat: tLat, lon: tLon } : {}) };
         await put('trips', t); tripById.set(t.id, t); tNew++;
       }
     }
@@ -1142,35 +1225,106 @@ $('xlsxFile').onchange = async e => {
   } catch (err) { msg.textContent = 'Import failed: ' + err.message; }
 };
 
-/* ---------- trip notes ---------- */
-let notesFor = null;
-function openTripNotes(g, first) {
-  notesFor = g;
-  $('tripNotesTitle').textContent = `Notes · ${fmtDay(first)}`;
-  $('tripNotesText').value = g.trip && g.trip.notes || '';
-  $('tripNotes').classList.add('open');
-  setTimeout(() => $('tripNotesText').focus(), 50);
+/* ---------- trip details ---------- */
+let teFor = null, tePinLL = null;
+const COUNT_FIELDS = [['fish', '# Fish kept'], ['bait', '# Bait fish'], ['avg', 'Avg size (cm)'], ['largest', 'Largest (cm)']];
+const dateInput = ms => toLocalInput(ms).slice(0, 10), timeInput = ms => toLocalInput(ms).slice(11, 16);
+function renderTePin() {
+  $('tePinInfo').textContent = tePinLL ? `${tePinLL.lat.toFixed(4)}, ${tePinLL.lon.toFixed(4)}` : 'No pin yet';
+  $('tePin').textContent = tePinLL ? '📍 Move pin' : '📍 Drop pin on map';
 }
-$('tripNotesCancel').onclick = () => { $('tripNotes').classList.remove('open'); notesFor = null; };
-$('tripNotes').onclick = e => { if (e.target.id === 'tripNotes') $('tripNotesCancel').click(); };
-$('tripNotesSave').onclick = async () => {
-  const g = notesFor, text = $('tripNotesText').value.trim();
-  $('tripNotes').classList.remove('open'); notesFor = null;
-  if (!g) return;
-  if (g.trip) {
-    const t = await get('trips', g.trip.id) || g.trip;
-    t.notes = text; await put('trips', t);
-    if (trip && trip.id === t.id) trip.notes = text;          // keep the running trip in sync
-  } else if (text) {
-    // a "No trip logged" day becomes a trip covering that day's catches
+function openTripEdit(g, first) {
+  teFor = g;
+  const t = g.trip, S = (t && t.summary) || {};
+  const running = !!(t && trip && trip.id === t.id);
+  tePinLL = t && t.lat != null ? { lat: t.lat, lon: t.lon } : null;
+  $('teTitle').textContent = `Trip · ${fmtDay(first)}`;
+  $('teNotes').value = (t && t.notes) || '';
+  $('teLoc').value = S.location || ''; $('teTech').value = S.technique || '';
+  $('teTideS').value = S.tideStart || ''; $('teTideE').value = S.tideEnd || '';
+  $('teMoon').value = S.moonNote || ''; $('teWx').value = S.weather || '';
+  const showTimes = !!(t && !t.auto && !running);
+  $('teTimes').style.display = showTimes ? '' : 'none';
+  if (showTimes) { $('teDate').value = dateInput(t.start); $('teStart').value = timeInput(t.start); $('teEnd').value = t.end ? timeInput(t.end) : ''; }
+  const showCounts = !!(t && t.imported);
+  $('teCounts').style.display = showCounts ? '' : 'none';
+  if (showCounts) {
+    const sp = S.species || {};
+    $('teCountGrid').innerHTML = [...COUNT_FIELDS.map(([k, l]) => [k, l, S[k]]), ...TRIP_SPECIES.map(n => ['sp:' + n, n, sp[n]])]
+      .map(([k, l, v]) => `<div><label>${l}</label><input type="number" inputmode="decimal" data-k="${k}" value="${v ?? ''}"></div>`).join('');
+  }
+  $('teDel').style.display = t && !running ? '' : 'none';
+  renderTePin();
+  $('tripEdit').classList.add('open');
+}
+const closeTripEdit = () => { $('tripEdit').classList.remove('open'); teFor = null; };
+$('teCancel').onclick = closeTripEdit;
+$('tripEdit').onclick = e => { if (e.target.id === 'tripEdit') closeTripEdit(); };
+$('tePin').onclick = () => {
+  const g = teFor; if (!g) return;
+  openPicker({ noTime: true, time: Date.now(), lat: tePinLL && tePinLL.lat, lon: tePinLL && tePinLL.lon },
+    w => { tePinLL = { lat: w.lat, lon: w.lon }; renderTePin(); });
+};
+$('teDel').onclick = async () => {
+  const g = teFor; if (!g || !g.trip) return;
+  if (!confirm('Delete this trip? Its catches are kept.')) return;
+  await del('trips', g.trip.id);
+  for (const c of await all('catches')) if (c.tripId === g.trip.id) { c.tripId = null; await put('catches', c); }
+  closeTripEdit(); renderList();
+};
+$('teSave').onclick = async () => {
+  const g = teFor; if (!g) return;
+  const txt = id => $(id).value.trim();
+  const notes = txt('teNotes');
+  const S = { location: txt('teLoc'), technique: txt('teTech'), tideStart: txt('teTideS'), tideEnd: txt('teTideE'),
+    moonNote: txt('teMoon'), weather: txt('teWx') };
+  let t = g.trip ? (await get('trips', g.trip.id)) || g.trip : null;
+  if (!t) {
+    // a "No trip logged" day becomes a trip for that date once it has any details
+    if (!notes && !tePinLL && !Object.values(S).some(Boolean)) { closeTripEdit(); return; }
     const d0 = new Date(Math.min(...g.catches.map(c => c.time))); d0.setHours(0, 0, 0, 0);
-    const t = { id: uid(), start: d0.getTime(), end: d0.getTime() + DMS - 1, track: [], auto: true, notes: text };
-    await put('trips', t);
+    t = { id: uid(), start: d0.getTime(), end: d0.getTime() + DMS - 1, track: [], auto: true };
     for (const c of g.catches) { const cur = await get('catches', c.id); if (cur) { cur.tripId = t.id; await put('catches', cur); } }
-    const set = new Set((await get('settings', 'collapsed')) || []);   // keep it open/closed as it was
+    const set = new Set((await get('settings', 'collapsed')) || []);
     if (set.has(g.key)) { set.delete(g.key); set.add('trip:' + t.id); await put('settings', [...set], 'collapsed'); }
   }
-  renderList();
+  const before = { start: t.start, end: t.end, lat: t.lat, lon: t.lon };
+  if ($('teTimes').style.display !== 'none') {
+    const d = $('teDate').value, a = $('teStart').value, b = $('teEnd').value;
+    if (!d || !a) return alert('Enter a date and start time');
+    const start = new Date(`${d}T${a}`).getTime();
+    let end = b ? new Date(`${d}T${b}`).getTime() : start;
+    if (end < start) end += DMS;                       // finished after midnight
+    t.start = start; t.end = end;
+  }
+  t.summary = { ...(t.summary || {}), ...S };
+  if (t.imported) {
+    const sp = {};
+    $('teCountGrid').querySelectorAll('input').forEach(i => {
+      const v = numOrNull(i.value), k = i.dataset.k;
+      if (k.startsWith('sp:')) { if (v != null) sp[k.slice(3)] = v; } else t.summary[k] = v;
+    });
+    t.summary.species = sp;
+  }
+  t.notes = notes;
+  if (tePinLL) { t.lat = tePinLL.lat; t.lon = tePinLL.lon; }
+  const moved = before.start !== t.start || before.end !== t.end || before.lat !== t.lat || before.lon !== t.lon;
+  if (moved) {
+    for (const k of ['weather', 'tideS', 'tideE', 'astro', 'wErr', 'wMsg', 'tErr', 'tMsg']) delete t[k];
+    if (t.lat != null && t.end) t.astro = astro((t.start + t.end) / 2, t.lat, t.lon);
+  }
+  if (trip && trip.id === t.id) Object.assign(trip, { notes: t.notes, summary: t.summary, lat: t.lat, lon: t.lon }); // running trip
+  await put('trips', t);
+  // catches in this trip with no location of their own use the trip's pin
+  if (t.lat != null) for (const c of await all('catches')) {
+    if (c.tripId === t.id && (c.lat == null || c.manual === 'trip')) {
+      const was = c.lat;
+      Object.assign(c, { lat: t.lat, lon: t.lon, acc: null, manual: 'trip' });
+      if (was !== t.lat) { c.weather = null; c.tide = null; if (!c.timeUnknown) c.astro = astro(c.time, c.lat, c.lon); }
+      await put('catches', c);
+    }
+  }
+  closeTripEdit(); renderList(); enrichAll();
 };
 
 /* ---------- leaderboard ---------- */
