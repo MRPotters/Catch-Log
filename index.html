@@ -562,7 +562,12 @@ async function enrichAll() {
     const key = (await get('settings', 'niwaKey')) || '';
     let changed = false;
     for (const t of await all('trips')) {
-      if (t.lat == null || !t.end || (trip && trip.id === t.id)) continue;
+      if (!t.end || (trip && trip.id === t.id)) continue;
+      if (t.lat == null && !t.imported && !t.auto) {
+        const p = t.track && t.track.length ? t.track[Math.floor(t.track.length / 2)] : (await all('catches')).find(c => c.tripId === t.id && c.lat != null);
+        if (p) { const cur = await get('trips', t.id); if (cur && cur.lat == null) { cur.lat = p.lat; cur.lon = p.lon; await put('trips', cur); t.lat = p.lat; t.lon = p.lon; } }
+      }
+      if (t.lat == null) continue;
       const mid = (t.start + t.end) / 2, upd = {};
       if (!t.astro) upd.astro = astro(mid, t.lat, t.lon);
       if (!t.weather && (t.wErr || 0) < MAX_TRIES) {
@@ -1086,6 +1091,28 @@ const BAIT = ['koheru', 'mackerel', 'mackrel', 'jack mackerel', 'pilchard', 'yel
 const TRIP_SPECIES = ['Snapper', 'Trevally', 'Kahawai', 'Koheru', 'Kingfish', 'Mackerel'];
 const TRIP_COLS = ['Trip ID', 'Date', 'Start Time', 'End Time', 'Location', 'Tide State (Start)', 'Tide State (End)',
   'Moon Phase', 'Weather Notes', '# of Fish', '# of Bait Fish', 'Avg Size (cm)', 'Largest Size (cm)', 'Notes / Technique', ...TRIP_SPECIES, 'Trip Notes', 'Latitude', 'Longitude'];
+// Conditions columns: filled by the app on export, ignored on import.
+const COND_COLS = ['Tide Stage', 'Tide Since', 'Tide Mins Since', 'Tide Height (m)', 'Wind (kn)', 'Wind Dir (deg)', 'Gust (kn)',
+  'Pressure (hPa)', 'Pressure 3h Change', 'Air Temp (C)', 'Cloud (%)', 'Rain (mm)', 'Moon Phase', 'Moon Age (days)', 'Moon Illum (%)',
+  'Sunrise', 'Sunset', 'Sun Event', 'Mins From Sun Event', 'Moon Up', 'Solunar', 'Mins From Major', 'Mins From Minor'];
+function condCells(t, w, td, a) {
+  const mp = moonPhase(t), tm = x => x ? timeSerial(x) : '', v = x => x ?? '';
+  return [td ? td.stage : '', td ? td.since : '', td ? td.mins_since : '', td ? td.height_m : '',
+    w ? v(w.wind_kn) : '', w ? v(w.wind_dir_deg) : '', w ? v(w.gust_kn) : '', w ? v(w.pressure_hpa) : '', w ? v(w.pressure_change_3h) : '',
+    w ? v(w.air_temp_c) : '', w ? v(w.cloud_pct) : '', w ? v(w.rain_mm) : '', mp.name, mp.age, mp.illum,
+    a ? tm(a.sunrise) : '', a ? tm(a.sunset) : '', a ? v(a.sun_event) : '', a ? v(a.sun_event_mins) : '',
+    a ? (a.moon_up ? 'Y' : 'N') : '', a ? v(a.solunar) : '', a ? v(a.mins_from_major) : '', a ? v(a.mins_from_minor) : ''];
+}
+const TRIP_COND_COLS = ['Tide Start Stage', 'Tide Start Since', 'Tide Start Mins Since', 'Tide End Stage', 'Tide End Since',
+  'Tide End Mins Since', 'Wind (kn)', 'Wind Dir (deg)', 'Gust (kn)', 'Pressure (hPa)', 'Air Temp (C)', 'Moon Phase (calc)', 'Moon Age (days)',
+  'Sunrise', 'Sunset'];
+function tripCondCells(t) {
+  const w = t.weather, a = t.astro, mp = moonPhase(t.end ? (t.start + t.end) / 2 : t.start), v = x => x ?? '';
+  const td = d => d ? [d.stage, d.since, d.mins_since] : ['', '', ''];
+  return [...td(t.tideS), ...td(t.tideE), w ? v(w.wind_kn) : '', w ? v(w.wind_dir_deg) : '', w ? v(w.gust_kn) : '',
+    w ? v(w.pressure_hpa) : '', w ? v(w.air_temp_c) : '', mp.name, mp.age,
+    a && a.sunrise ? timeSerial(a.sunrise) : '', a && a.sunset ? timeSerial(a.sunset) : ''];
+}
 const CATCH_COLS = ['Catch ID', 'Trip ID', 'Date', 'Time', 'Species', 'Length (cm)', 'Weight (kg)', 'Method', 'Caught By',
   'Released (Y/N)', 'Latitude', 'Longitude', 'Notes'];
 function loadXLSX() {
@@ -1126,7 +1153,7 @@ $('xlsxOut').onclick = async () => {
     await loadXLSX();
     const trips = (await all('trips')).sort((a, b) => a.start - b.start);
     const cs = (await all('catches')).sort((a, b) => a.time - b.time);
-    const tRows = [TRIP_COLS], cRows = [CATCH_COLS];
+    const tRows = [[...TRIP_COLS, ...TRIP_COND_COLS]], cRows = [[...CATCH_COLS, ...COND_COLS]];
     for (const t of trips) {
       const S = t.summary || {}, mine = cs.filter(c => c.tripId === t.id);
       const cnt = sp => t.imported ? (S.species || {})[sp] ?? '' : mine.filter(c => (c.species || '').toLowerCase() === sp.toLowerCase()).length || '';
@@ -1135,11 +1162,11 @@ $('xlsxOut').onclick = async () => {
         S.tideStart || '', S.tideEnd || '', S.moonNote || '', S.weather || '',
         t.imported ? S.fish ?? '' : mine.filter(c => !c.released).length || '', t.imported ? S.bait ?? '' : '',
         t.imported ? S.avg ?? '' : sizes.length ? Math.round(sizes.reduce((a, b) => a + b) / sizes.length) : '',
-        t.imported ? S.largest ?? '' : sizes.length ? Math.max(...sizes) : '', S.technique || '', ...TRIP_SPECIES.map(cnt), t.notes || '', t.lat ?? '', t.lon ?? '']);
+        t.imported ? S.largest ?? '' : sizes.length ? Math.max(...sizes) : '', S.technique || '', ...TRIP_SPECIES.map(cnt), t.notes || '', t.lat ?? '', t.lon ?? '', ...tripCondCells(t)]);
     }
     for (const c of cs) cRows.push([c.id, c.tripId || '', dateSerial(c.time), c.timeUnknown ? '' : timeSerial(c.time), c.species || '',
       numOrNull(c.size) ?? '', numOrNull(c.weight) ?? '', c.method || '', c.angler || '', c.released ? 'Y' : '',
-      c.lat ?? '', c.lon ?? '', c.notes || '']);
+      c.lat ?? '', c.lon ?? '', c.notes || '', ...condCells(c.time, c.weather, c.tide, c.timeUnknown ? null : c.astro)]);
     const wb = XLSX.utils.book_new();
     const fmt = (ws, rows, dateCols, timeCols) => {
       for (let r = 1; r < rows.length; r++) {
@@ -1148,8 +1175,9 @@ $('xlsxOut').onclick = async () => {
       }
       ws['!cols'] = rows[0].map(h => ({ wch: Math.max(10, h.length + 2) }));
     };
-    const ws1 = XLSX.utils.aoa_to_sheet(tRows); fmt(ws1, tRows, [1], [2, 3]);
-    const ws2 = XLSX.utils.aoa_to_sheet(cRows); fmt(ws2, cRows, [2], [3]);
+    const tc = n => tRows[0].indexOf(n), cc = n => cRows[0].indexOf(n);
+    const ws1 = XLSX.utils.aoa_to_sheet(tRows); fmt(ws1, tRows, [1], [2, 3, tc('Sunrise'), tc('Sunset')]);
+    const ws2 = XLSX.utils.aoa_to_sheet(cRows); fmt(ws2, cRows, [2], [3, cc('Sunrise'), cc('Sunset')]);
     XLSX.utils.book_append_sheet(wb, ws1, 'Trips'); XLSX.utils.book_append_sheet(wb, ws2, 'Catches');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     download(`CatchLog_${fileStamp(Date.now())}.xlsx`, new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
